@@ -4,7 +4,7 @@ import WebKit
 struct Options {
     var html: String = ""
     var url: URL? = nil
-    var title: String = "HTML Viewer"
+    var title: String = ""
     var width: CGFloat = 800
     var height: CGFloat = 600
     var env: String = "{}" // Default empty JSON object
@@ -19,13 +19,47 @@ func readStdin() -> String {
     return input
 }
 
+var currentVersion = "dev" // Default version, will be overridden by build system
+
+func printUsage() {
+    print("""
+Usage: htmlpopup [OPTIONS] content
+
+Arguments:
+  content
+    HTML content string, path to an HTML file, a URL, or a directory.
+    Use '-' to read HTML from stdin.
+    If a directory is provided, it will serve 'index.html' from that directory
+    or generate a directory listing if 'index.html' is not found.
+
+Options:
+  --title <title>         Set the window title (default: <empty>).
+  --width <width>         Set the window width (default: 800)
+  --height <height>       Set the window height (default: 600)
+  --env <json_string>     Provide a JSON string to be injected as window.env in the web view.
+  --version               Print the version of htmlpopup.
+  --help                  Print this help message.
+""")
+}
+
 func parseArguments() -> Options? {
     var options = Options()
     var args = Array(CommandLine.arguments.dropFirst())
     
+    // Check for --version or --help flag first
+    if args.contains("--version") {
+        print("htmlpopup version: \(currentVersion)")
+        return nil // Exit after printing version
+    }
+    
+    if args.contains("--help") {
+        printUsage()
+        return nil // Exit after printing usage
+    }
+    
+
     guard !args.isEmpty else {
-        print("Usage: htmlpopup [--title title] [--width width] [--height height] [--env json_string] [--static directory] <html_content_or_file|url|->")
-        print("Use - to read HTML from stdin")
+        printUsage()
         return nil
     }
     
@@ -42,6 +76,7 @@ func parseArguments() -> Options? {
                 options.width = CGFloat(width)
             } else {
                 print("Invalid width value: \(value)")
+                printUsage()
                 return nil
             }
         case "--height":
@@ -49,6 +84,7 @@ func parseArguments() -> Options? {
                 options.height = CGFloat(height)
             } else {
                 print("Invalid height value: \(value)")
+                printUsage()
                 return nil
             }
         case "--env":
@@ -58,12 +94,12 @@ func parseArguments() -> Options? {
                 options.env = value
             } else {
                 print("Invalid JSON string for --env")
+                printUsage()
                 return nil
             }
-        case "--static":
-            options.staticDirectory = value
         default:
             print("Unknown option: \(flag)")
+            printUsage()
             return nil
         }
     }
@@ -71,6 +107,7 @@ func parseArguments() -> Options? {
     // Then parse the content argument
     guard !args.isEmpty else {
         print("Missing content argument")
+        printUsage()
         return nil
     }
     
@@ -78,18 +115,17 @@ func parseArguments() -> Options? {
     
     if contentArg == "-" {
         options.html = readStdin()
-        options.title = options.title == "HTML Viewer" ? "stdin" : options.title
+    } else if (try? FileManager.default.attributesOfItem(atPath: contentArg)[.type] as? FileAttributeType) == .typeDirectory {
+        options.staticDirectory = contentArg
     } else if FileManager.default.fileExists(atPath: contentArg) {
         do {
             options.html = try String(contentsOfFile: contentArg, encoding: .utf8)
-            options.title = options.title == "HTML Viewer" ? (contentArg as NSString).lastPathComponent : options.title
         } catch {
             print("Error reading file: \(error)")
             return nil
         }
     } else if let url = URL(string: contentArg) {
         options.url = url
-        options.title = options.title == "HTML Viewer" ? url.lastPathComponent : options.title
     } else {
         // If none of the above match, assume it's HTML
         options.html = contentArg
@@ -97,6 +133,7 @@ func parseArguments() -> Options? {
     
     if !args.isEmpty {
         print("Unexpected argument: \(args[0])")
+        printUsage()
         return nil
     }
     
@@ -234,10 +271,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKScri
         let viewMenu = NSMenu(title: "View")
         viewMenuItem.submenu = viewMenu
         
-        viewMenu.addItem(NSMenuItem(title: "Toggle Web Inspector", 
-                                  action: #selector(toggleWebInspector), 
-                                  keyEquivalent: "i"))
-        viewMenu.items.last?.keyEquivalentModifierMask = [.command, .option]
 
         // Add Edit menu
         let editMenuItem = NSMenuItem()
@@ -473,10 +506,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKScri
         windowController?.isPinned.toggle()
     }
 
-    @objc func toggleWebInspector(_ sender: Any?) {
-        webView?.toggleInspector(nil)
-    }
-    
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         return true
     }
