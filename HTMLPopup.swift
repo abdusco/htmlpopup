@@ -24,33 +24,13 @@ func parseArguments() -> Options? {
     var args = Array(CommandLine.arguments.dropFirst())
     
     guard !args.isEmpty else {
-        print("Usage: htmlpopup <html_content_or_file|url|-) [--title title] [--width width] [--height height] [--env json_string] [--static directory]")
+        print("Usage: htmlpopup [--title title] [--width width] [--height height] [--env json_string] [--static directory] <html_content_or_file|url|->")
         print("Use - to read HTML from stdin")
         return nil
     }
     
-    let firstArg = args.removeFirst()
-    
-    if firstArg == "-" {
-        options.html = readStdin()
-        options.title = "stdin"
-    } else if FileManager.default.fileExists(atPath: firstArg) {
-        do {
-            options.html = try String(contentsOfFile: firstArg, encoding: .utf8)
-            options.title = (firstArg as NSString).lastPathComponent
-        } catch {
-            print("Error reading file: \(error)")
-            return nil
-        }
-    } else if let url = URL(string: firstArg) {
-        options.url = url
-        options.title = url.lastPathComponent
-    } else {
-        // If none of the above match, assume it's HTML
-        options.html = firstArg
-    }
-    
-    while args.count >= 2 {
+    // First parse all flags
+    while args.count >= 2 && args[0].hasPrefix("--") {
         let flag = args.removeFirst()
         let value = args.removeFirst()
         
@@ -88,8 +68,35 @@ func parseArguments() -> Options? {
         }
     }
     
+    // Then parse the content argument
+    guard !args.isEmpty else {
+        print("Missing content argument")
+        return nil
+    }
+    
+    let contentArg = args.removeFirst()
+    
+    if contentArg == "-" {
+        options.html = readStdin()
+        options.title = options.title == "HTML Viewer" ? "stdin" : options.title
+    } else if FileManager.default.fileExists(atPath: contentArg) {
+        do {
+            options.html = try String(contentsOfFile: contentArg, encoding: .utf8)
+            options.title = options.title == "HTML Viewer" ? (contentArg as NSString).lastPathComponent : options.title
+        } catch {
+            print("Error reading file: \(error)")
+            return nil
+        }
+    } else if let url = URL(string: contentArg) {
+        options.url = url
+        options.title = options.title == "HTML Viewer" ? url.lastPathComponent : options.title
+    } else {
+        // If none of the above match, assume it's HTML
+        options.html = contentArg
+    }
+    
     if !args.isEmpty {
-        print("Unpaired argument: \(args[0])")
+        print("Unexpected argument: \(args[0])")
         return nil
     }
     
