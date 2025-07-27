@@ -26,8 +26,9 @@ jobs:
       - name: Build Swift application
         run: |
           chmod +x build.sh
+          commit=$(git rev-parse --short HEAD)
+          export VERSION="${{ github.ref_name }}-$commit"
           export ARCH="${{ matrix.arch }}"
-          export VERSION="${{ github.ref_name }}"
           ./build.sh
 
       - name: Package binary for release
