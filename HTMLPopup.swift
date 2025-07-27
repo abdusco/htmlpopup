@@ -22,7 +22,7 @@ func readStdin() -> String {
 var currentVersion = "dev" // Default version, will be overridden by build system
 
 func printUsage() {
-    print("""
+    fputs("""
 Usage: htmlpopup [OPTIONS] content
 
 Arguments:
@@ -36,46 +36,42 @@ Options:
   --title <title>         Set the window title (default: <empty>).
   --width <width>         Set the window width (default: 800)
   --height <height>       Set the window height (default: 600)
-  --env <json_string>     Provide a JSON string to be injected as window.env in the web view.
+  --env <json_object>     Provide a JSON object to be injected as window.env in the web view.
   --env.<key> <value>     Provide individual key-value pairs to be injected as window.env. Values are parsed as JSON if possible, otherwise as strings.
   --version               Print the version of htmlpopup.
   --help                  Print this help message.
-""")
+""", stderr)
 }
 
-func parseArguments() -> Options? {
+
+struct ArgumentError: Error {
+    let message: String
+}
+
+func parseArguments() throws -> Options {
     var options = Options()
     let args = Array(CommandLine.arguments.dropFirst())
     var envArgs: [String: Any] = [:]
-    var i = 0
 
     // First pass: Check for --version or --help flag
     if args.contains("--version") {
         print("htmlpopup version: \(currentVersion)")
-        return nil
+        exit(0)
     }
     if args.contains("--help") {
         printUsage()
-        return nil
+        exit(0)
     }
 
-    // Second pass: Parse all flags and the content argument
-    while i < args.count {
-        let arg = args[i]
-
+    var argIterator = args.makeIterator()
+    while let arg = argIterator.next() {
         if arg.hasPrefix("--") {
-            // It's a flag
             if arg.hasPrefix("--env.") {
                 // Handle --env.KEY
                 let key = String(arg.dropFirst(6))
-                i += 1
-                guard i < args.count else {
-                    print("Missing value for \(arg)")
-                    printUsage()
-                    return nil
+                guard let valueString = argIterator.next() else {
+                    throw ArgumentError(message: "Missing value for \(arg)")
                 }
-                let valueString = args[i]
-
                 if let data = valueString.data(using: .utf8),
                    let jsonValue = try? JSONSerialization.jsonObject(with: data, options: .allowFragments) {
                     envArgs[key] = jsonValue
@@ -83,15 +79,9 @@ func parseArguments() -> Options? {
                     envArgs[key] = valueString
                 }
             } else {
-                // Handle other flags like --title, --width, --height, --env
-                i += 1
-                guard i < args.count else {
-                    print("Missing value for \(arg)")
-                    printUsage()
-                    return nil
+                guard let value = argIterator.next() else {
+                    throw ArgumentError(message: "Missing value for \(arg)")
                 }
-                let value = args[i]
-
                 switch arg {
                 case "--title":
                     options.title = value
@@ -99,31 +89,27 @@ func parseArguments() -> Options? {
                     if let width = Double(value) {
                         options.width = CGFloat(width)
                     } else {
-                        print("Invalid width value: \(value)")
-                        printUsage()
-                        return nil
+                        throw ArgumentError(message: "Invalid width value: \(value)")
                     }
                 case "--height":
                     if let height = Double(value) {
                         options.height = CGFloat(height)
                     } else {
-                        print("Invalid height value: \(value)")
-                        printUsage()
-                        return nil
+                        throw ArgumentError(message: "Invalid height value: \(value)")
                     }
                 case "--env":
-                    if let data = value.data(using: .utf8),
-                       let jsonObject = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                        options.env = jsonObject // This will be merged with envArgs later
+                    if let data = value.data(using: .utf8) {
+                        let json = try? JSONSerialization.jsonObject(with: data)
+                        if let dict = json as? [String: Any] {
+                            options.env = dict // This will be merged with envArgs later
+                        } else {
+                            throw ArgumentError(message: "The JSON string for --env must be an object/dictionary: \(value)")
+                        }
                     } else {
-                        print("Invalid JSON string for --env")
-                        printUsage()
-                        return nil
+                        throw ArgumentError(message: "Invalid JSON string for --env: \(value)")
                     }
                 default:
-                    print("Unknown option: \(arg)")
-                    printUsage()
-                    return nil
+                    throw ArgumentError(message: "Unknown option: \(arg)")
                 }
             }
         } else {
@@ -137,39 +123,31 @@ func parseArguments() -> Options? {
                     if FileManager.default.fileExists(atPath: indexPath) {
                         options.staticDirectory = contentArg
                     } else {
-                        print("The static directory does not contain an index.html file.")
-                        return nil
+                        throw ArgumentError(message: "The static directory does not contain an index.html file: \(contentArg)")
                     }
                 } else if FileManager.default.fileExists(atPath: contentArg) {
                     do {
                         options.html = try String(contentsOfFile: contentArg, encoding: .utf8)
                     } catch {
-                        print("Error reading file: \(error)")
-                        return nil
+                        throw ArgumentError(message: "Error reading file: \(error)")
                     }
-                } else if let url = URL(string: contentArg) {
+                } else if let url = URL(string: contentArg), let scheme = url.scheme?.lowercased(), (scheme == "http" || scheme == "https") {
                     options.url = url
                 } else {
                     options.html = contentArg
                 }
             } else {
-                // Content argument already set, this is an unexpected argument
-                print("Unexpected argument: \(arg)")
-                printUsage()
-                return nil
+                throw ArgumentError(message: "Unexpected argument: \(arg)")
             }
         }
-        i += 1
     }
 
-    // Merge envArgs into options.env, prioritizing envArgs
-    options.env = options.env.merging(envArgs) { (current, new) in new }
+    // Merge envArgs into env, prioritizing envArgs
+    options.env = options.env.merging(envArgs) { (_, new) in new }
 
     // Ensure content argument was provided
     guard !(options.html.isEmpty && options.url == nil && options.staticDirectory == nil) else {
-        print("Missing content argument")
-        printUsage()
-        return nil
+        throw ArgumentError(message: "Missing content argument")
     }
     
     return options
@@ -278,6 +256,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKScri
     var windowController: WindowController?
     var webView: WKWebView?
     var closeString: String?
+    let options: Options
+
+    init(options: Options) {
+        self.options = options
+        super.init()
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
@@ -321,10 +305,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKScri
         editMenu.addItem(NSMenuItem(title: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v"))
         editMenu.addItem(NSMenuItem(title: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a"))
         
-        guard let options = parseArguments() else {
-            NSApplication.shared.terminate(nil)
-            return
-        }
 
         windowController = WindowController(
             width: options.width,
@@ -602,7 +582,15 @@ extension WKWebView {
     }
 }
 
-let app = NSApplication.shared
-let delegate = AppDelegate()
-app.delegate = delegate
-app.run()
+// Parse and validate arguments before launching the app
+do {
+    let options = try parseArguments()
+    let app = NSApplication.shared
+    let delegate = AppDelegate(options: options)
+    app.delegate = delegate
+    app.run()
+} catch let error as ArgumentError {
+    fputs("Error: \(error.message)\n", stderr)
+    printUsage()
+    exit(1)
+}
