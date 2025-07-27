@@ -1,14 +1,13 @@
 import Cocoa
 import WebKit
 
-struct Options {
-    var html: String = ""
-    var url: URL? = nil
-    var title: String = ""
-    var width: CGFloat = 800
-    var height: CGFloat = 600
-    var env: [String: Any] = [:] // Default empty dictionary
-    var staticDirectory: String? = nil
+func logError(_ message: String) {
+    fputs("ERROR: \(message)\n", stderr)
+}
+
+func logFatalError(_ message: String) -> Never {
+    NSApplication.shared.terminate(nil)
+    fatalError("FATAL: \(message)")
 }
 
 func readStdin() -> String {
@@ -17,6 +16,16 @@ func readStdin() -> String {
         input += line + "\n"
     }
     return input
+}
+
+struct Options {
+    var html: String = ""
+    var url: URL? = nil
+    var title: String = ""
+    var width: CGFloat = 800
+    var height: CGFloat = 600
+    var env: [String: Any] = [:] // Default empty dictionary
+    var staticDirectory: String? = nil
 }
 
 var currentVersion = "dev" // Default version, will be overridden by build system
@@ -264,55 +273,61 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKScri
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.setActivationPolicy(.regular)
-        
-        // Create the menu bar
+        NSApplication.shared.setActivationPolicy(.regular)
+        setupMenuBar()
+        setupWindowAndWebView()
+    }
+
+    private func setupMenuBar() {
         let menuBar = NSMenu()
-        NSApp.mainMenu = menuBar
-        
-        // File menu
+        NSApplication.shared.mainMenu = menuBar
+
         let fileMenuItem = NSMenuItem()
         menuBar.addItem(fileMenuItem)
         let fileMenu = NSMenu(title: "File")
         fileMenuItem.submenu = fileMenu
-        
+
         fileMenu.addItem(NSMenuItem(title: "Close Window", 
-                                  action: #selector(NSWindow.performClose(_:)), 
-                                  keyEquivalent: "w"))
+                                    action: #selector(NSWindow.performClose(_:)), 
+                                    keyEquivalent: "w"))
         fileMenu.addItem(NSMenuItem.separator())
         fileMenu.addItem(NSMenuItem(title: "Quit", 
-                                  action: #selector(NSApplication.terminate(_:)), 
-                                  keyEquivalent: "q"))
-        
-        // View menu
-        let viewMenuItem = NSMenuItem()
-        menuBar.addItem(viewMenuItem)
-        let viewMenu = NSMenu(title: "View")
-        viewMenuItem.submenu = viewMenu
-        
+                                    action: #selector(NSApplication.terminate(_:)), 
+                                    keyEquivalent: "q"))
 
-        // Add Edit menu
         let editMenuItem = NSMenuItem()
         menuBar.addItem(editMenuItem)
         let editMenu = NSMenu(title: "Edit")
         editMenuItem.submenu = editMenu
         
-        editMenu.addItem(NSMenuItem(title: "Undo", action: Selector(("undo:")), keyEquivalent: "z"))
-        editMenu.addItem(NSMenuItem(title: "Redo", action: Selector(("redo:")), keyEquivalent: "Z"))
+        editMenu.addItem(NSMenuItem(title: "Undo", 
+                                    action: Selector(("undo:")), 
+                                    keyEquivalent: "z"))
+        editMenu.addItem(NSMenuItem(title: "Redo", 
+                                    action: Selector(("redo:")), 
+                                    keyEquivalent: "Z"))
         editMenu.addItem(NSMenuItem.separator())
-        editMenu.addItem(NSMenuItem(title: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x"))
-        editMenu.addItem(NSMenuItem(title: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c"))
-        editMenu.addItem(NSMenuItem(title: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v"))
-        editMenu.addItem(NSMenuItem(title: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a"))
-        
+        editMenu.addItem(NSMenuItem(title: "Cut", 
+                                    action: #selector(NSText.cut(_:)), 
+                                    keyEquivalent: "x"))
+        editMenu.addItem(NSMenuItem(title: "Copy", 
+                                    action: #selector(NSText.copy(_:)), 
+                                    keyEquivalent: "c"))
+        editMenu.addItem(NSMenuItem(title: "Paste", 
+                                    action: #selector(NSText.paste(_:)), 
+                                    keyEquivalent: "v"))
+        editMenu.addItem(NSMenuItem(title: "Select All", 
+                                    action: #selector(NSText.selectAll(_:)), 
+                                    keyEquivalent: "a"))
+    }
 
+    private func setupWindowAndWebView() {
         windowController = WindowController(
             width: options.width,
             height: options.height,
             title: options.title
         )
 
-        // Crucial fix:  Create the WKWebView *before* the windowController
         let userContentController = WKUserContentController()
         userContentController.add(self, name: "app")
         setupUserScripts(userContentController: userContentController, env: options.env)
@@ -320,69 +335,64 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKScri
         config.userContentController = userContentController
         config.preferences.setValue(true, forKey: "developerExtrasEnabled")
         config.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
-        
         config.setValue(true, forKey: "allowUniversalAccessFromFileURLs")
         if #available(macOS 11.0, *) {
             config.limitsNavigationsToAppBoundDomains = false
         }
-    
-        webView = WKWebView(frame: windowController!.window!.contentView!.bounds, configuration: config)
-        webView?.autoresizingMask = [.width, .height]
-        webView?.navigationDelegate = self
+
+        guard let contentView = windowController?.window?.contentView else {
+            logFatalError("Window contentView is nil.")
+        }
+
+        webView = WKWebView(frame: contentView.bounds, configuration: config)
+        guard let webView = webView else {
+            logFatalError("Failed to create WKWebView.")
+        }
+        webView.autoresizingMask = [.width, .height]
+        webView.navigationDelegate = self
 
         if #available(macOS 10.14, *) {
-            webView?.setValue(false, forKey: "drawsBackground")
+            webView.setValue(false, forKey: "drawsBackground")
         }
-        
+
         if let staticDir = options.staticDirectory {
             let dirURL = URL(fileURLWithPath: staticDir, isDirectory: true)
             let indexURL = dirURL.appendingPathComponent("index.html")
             if FileManager.default.fileExists(atPath: indexURL.path) {
-                webView?.loadFileURL(indexURL, allowingReadAccessTo: dirURL)
+                webView.loadFileURL(indexURL, allowingReadAccessTo: dirURL)
             } else {
-                print("The static directory does not contain an index.html file.")
-                NSApplication.shared.terminate(nil)
-                return
+                logFatalError("The static directory does not contain an index.html file.")
             }
         } else if let url = options.url {
-            webView?.load(URLRequest(url: url))
+            webView.load(URLRequest(url: url))
         } else if !options.html.isEmpty {
-            webView?.loadHTMLString(options.html, baseURL: nil)
+            webView.loadHTMLString(options.html, baseURL: nil)
         } else {
-            print("No content to load.")
-            return
+            logFatalError("No content to load.")
         }
 
-        // Add the WKWebView to the contentView
-        windowController!.window!.contentView?.addSubview(webView!)
+        contentView.addSubview(webView)
 
-        windowController!.showWindow(nil)
-        NSApp.activate(ignoringOtherApps: true)
-        windowController!.window!.makeKey()
-        windowController!.window!.orderFront(nil)
+        windowController?.showWindow(nil)
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        windowController?.window?.makeKeyAndOrderFront(nil)
     }
 
     func webView(_ webView: WKWebView, 
                 decidePolicyFor navigationAction: WKNavigationAction,
                 decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-        
         if let url = navigationAction.request.url {
-            // Check if the URL scheme is different from http/https
+            // Allow only http, https, about, and file schemes in the webview
             if let scheme = url.scheme?.lowercased(),
-            scheme != "http" && scheme != "https" && scheme != "about" && scheme != "file" {
-                
+                scheme != "http" && scheme != "https" && scheme != "about" && scheme != "file" {
                 // Handle external protocol
                 if !NSWorkspace.shared.open(url) {
-                    print("Failed to open URL: \(url)")
+                    logError("Failed to open URL: \(url)")
                 }
-                
-                // Cancel the navigation in WebView
                 decisionHandler(.cancel)
                 return
             }
         }
-        
-        // Allow normal http/https navigation
         decisionHandler(.allow)
     }
 
@@ -459,7 +469,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKScri
                         appSelectFolder(callbackId: callbackId)
                     }
                 default:
-                    print("Unknown action: \(messageBody["action"] ?? "")")
+                    logError("Unknown action: \(messageBody["action"] ?? "")")
                 }
             }
         }
@@ -590,7 +600,7 @@ do {
     app.delegate = delegate
     app.run()
 } catch let error as ArgumentError {
-    fputs("Error: \(error.message)\n", stderr)
+    logError(error.message)
     printUsage()
     exit(1)
 }
