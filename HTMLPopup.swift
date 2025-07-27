@@ -116,7 +116,13 @@ func parseArguments() -> Options? {
     if contentArg == "-" {
         options.html = readStdin()
     } else if (try? FileManager.default.attributesOfItem(atPath: contentArg)[.type] as? FileAttributeType) == .typeDirectory {
-        options.staticDirectory = contentArg
+        let indexPath = (contentArg as NSString).appendingPathComponent("index.html")
+        if FileManager.default.fileExists(atPath: indexPath) {
+            options.staticDirectory = contentArg
+        } else {
+            print("The static directory does not contain an index.html file.")
+            return nil
+        }
     } else if FileManager.default.fileExists(atPath: contentArg) {
         do {
             options.html = try String(contentsOfFile: contentArg, encoding: .utf8)
@@ -322,13 +328,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKScri
         if let staticDir = options.staticDirectory {
             let dirURL = URL(fileURLWithPath: staticDir, isDirectory: true)
             let indexURL = dirURL.appendingPathComponent("index.html")
-            
             if FileManager.default.fileExists(atPath: indexURL.path) {
                 webView?.loadFileURL(indexURL, allowingReadAccessTo: dirURL)
             } else {
-                // Generate directory listing HTML if no index.html exists
-                let listing = generateDirectoryListing(for: dirURL)
-                webView?.loadHTMLString(listing, baseURL: dirURL)
+                print("The static directory does not contain an index.html file.")
+                NSApplication.shared.terminate(nil)
+                return
             }
         } else if let url = options.url {
             webView?.load(URLRequest(url: url))
