@@ -121,3 +121,8 @@ To run the compiled executable:
 ```bash
 ./htmlpopup-arm64 "<h1>Hello from local build!</h1>"
 ```
+
+
+## Compatibility
+
+Tested on macOS Ventura 13.3.1 (a) (22E772610a).
