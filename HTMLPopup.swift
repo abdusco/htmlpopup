@@ -7,7 +7,7 @@ struct Options {
     var title: String = ""
     var width: CGFloat = 800
     var height: CGFloat = 600
-    var env: String = "{}" // Default empty JSON object
+    var env: [String: Any] = [:] // Default empty dictionary
     var staticDirectory: String? = nil
 }
 
@@ -37,6 +37,7 @@ Options:
   --width <width>         Set the window width (default: 800)
   --height <height>       Set the window height (default: 600)
   --env <json_string>     Provide a JSON string to be injected as window.env in the web view.
+  --env.<key> <value>     Provide individual key-value pairs to be injected as window.env. Values are parsed as JSON if possible, otherwise as strings.
   --version               Print the version of htmlpopup.
   --help                  Print this help message.
 """)
@@ -44,101 +45,129 @@ Options:
 
 func parseArguments() -> Options? {
     var options = Options()
-    var args = Array(CommandLine.arguments.dropFirst())
-    
-    // Check for --version or --help flag first
+    let args = Array(CommandLine.arguments.dropFirst())
+    var envArgs: [String: Any] = [:]
+    var i = 0
+
+    // First pass: Check for --version or --help flag
     if args.contains("--version") {
         print("htmlpopup version: \(currentVersion)")
-        return nil // Exit after printing version
+        return nil
     }
-    
     if args.contains("--help") {
         printUsage()
-        return nil // Exit after printing usage
+        return nil
     }
-    
 
-    guard !args.isEmpty else {
-        printUsage()
-        return nil
-    }
-    
-    // First parse all flags
-    while args.count >= 2 && args[0].hasPrefix("--") {
-        let flag = args.removeFirst()
-        let value = args.removeFirst()
-        
-        switch flag {
-        case "--title":
-            options.title = value
-        case "--width":
-            if let width = Double(value) {
-                options.width = CGFloat(width)
+    // Second pass: Parse all flags and the content argument
+    while i < args.count {
+        let arg = args[i]
+
+        if arg.hasPrefix("--") {
+            // It's a flag
+            if arg.hasPrefix("--env.") {
+                // Handle --env.KEY
+                let key = String(arg.dropFirst(6))
+                i += 1
+                guard i < args.count else {
+                    print("Missing value for \(arg)")
+                    printUsage()
+                    return nil
+                }
+                let valueString = args[i]
+
+                if let data = valueString.data(using: .utf8),
+                   let jsonValue = try? JSONSerialization.jsonObject(with: data, options: .allowFragments) {
+                    envArgs[key] = jsonValue
+                } else {
+                    envArgs[key] = valueString
+                }
             } else {
-                print("Invalid width value: \(value)")
-                printUsage()
-                return nil
+                // Handle other flags like --title, --width, --height, --env
+                i += 1
+                guard i < args.count else {
+                    print("Missing value for \(arg)")
+                    printUsage()
+                    return nil
+                }
+                let value = args[i]
+
+                switch arg {
+                case "--title":
+                    options.title = value
+                case "--width":
+                    if let width = Double(value) {
+                        options.width = CGFloat(width)
+                    } else {
+                        print("Invalid width value: \(value)")
+                        printUsage()
+                        return nil
+                    }
+                case "--height":
+                    if let height = Double(value) {
+                        options.height = CGFloat(height)
+                    } else {
+                        print("Invalid height value: \(value)")
+                        printUsage()
+                        return nil
+                    }
+                case "--env":
+                    if let data = value.data(using: .utf8),
+                       let jsonObject = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                        options.env = jsonObject // This will be merged with envArgs later
+                    } else {
+                        print("Invalid JSON string for --env")
+                        printUsage()
+                        return nil
+                    }
+                default:
+                    print("Unknown option: \(arg)")
+                    printUsage()
+                    return nil
+                }
             }
-        case "--height":
-            if let height = Double(value) {
-                options.height = CGFloat(height)
-            } else {
-                print("Invalid height value: \(value)")
-                printUsage()
-                return nil
-            }
-        case "--env":
-            // Verify that the JSON is valid
-            if let data = value.data(using: .utf8),
-               (try? JSONSerialization.jsonObject(with: data)) != nil {
-                options.env = value
-            } else {
-                print("Invalid JSON string for --env")
-                printUsage()
-                return nil
-            }
-        default:
-            print("Unknown option: \(flag)")
-            printUsage()
-            return nil
-        }
-    }
-    
-    // Then parse the content argument
-    guard !args.isEmpty else {
-        print("Missing content argument")
-        printUsage()
-        return nil
-    }
-    
-    let contentArg = args.removeFirst()
-    
-    if contentArg == "-" {
-        options.html = readStdin()
-    } else if (try? FileManager.default.attributesOfItem(atPath: contentArg)[.type] as? FileAttributeType) == .typeDirectory {
-        let indexPath = (contentArg as NSString).appendingPathComponent("index.html")
-        if FileManager.default.fileExists(atPath: indexPath) {
-            options.staticDirectory = contentArg
         } else {
-            print("The static directory does not contain an index.html file.")
-            return nil
+            // It's not a flag, so it must be the content argument
+            if options.html.isEmpty && options.url == nil && options.staticDirectory == nil {
+                let contentArg = arg
+                if contentArg == "-" {
+                    options.html = readStdin()
+                } else if (try? FileManager.default.attributesOfItem(atPath: contentArg)[.type] as? FileAttributeType) == .typeDirectory {
+                    let indexPath = (contentArg as NSString).appendingPathComponent("index.html")
+                    if FileManager.default.fileExists(atPath: indexPath) {
+                        options.staticDirectory = contentArg
+                    } else {
+                        print("The static directory does not contain an index.html file.")
+                        return nil
+                    }
+                } else if FileManager.default.fileExists(atPath: contentArg) {
+                    do {
+                        options.html = try String(contentsOfFile: contentArg, encoding: .utf8)
+                    } catch {
+                        print("Error reading file: \(error)")
+                        return nil
+                    }
+                } else if let url = URL(string: contentArg) {
+                    options.url = url
+                } else {
+                    options.html = contentArg
+                }
+            } else {
+                // Content argument already set, this is an unexpected argument
+                print("Unexpected argument: \(arg)")
+                printUsage()
+                return nil
+            }
         }
-    } else if FileManager.default.fileExists(atPath: contentArg) {
-        do {
-            options.html = try String(contentsOfFile: contentArg, encoding: .utf8)
-        } catch {
-            print("Error reading file: \(error)")
-            return nil
-        }
-    } else if let url = URL(string: contentArg) {
-        options.url = url
-    } else {
-        // If none of the above match, assume it's HTML
-        options.html = contentArg
+        i += 1
     }
-    
-    if !args.isEmpty {
-        print("Unexpected argument: \(args[0])")
+
+    // Merge envArgs into options.env, prioritizing envArgs
+    options.env = options.env.merging(envArgs) { (current, new) in new }
+
+    // Ensure content argument was provided
+    guard !(options.html.isEmpty && options.url == nil && options.staticDirectory == nil) else {
+        print("Missing content argument")
         printUsage()
         return nil
     }
@@ -306,7 +335,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKScri
         // Crucial fix:  Create the WKWebView *before* the windowController
         let userContentController = WKUserContentController()
         userContentController.add(self, name: "app")
-        setupUserScripts(userContentController: userContentController, envJson: options.env)
+        setupUserScripts(userContentController: userContentController, env: options.env)
         let config = WKWebViewConfiguration()
         config.userContentController = userContentController
         config.preferences.setValue(true, forKey: "developerExtrasEnabled")
@@ -377,13 +406,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKScri
         decisionHandler(.allow)
     }
 
-    func setupUserScripts(userContentController: WKUserContentController, envJson: String = "{}") {
+    func setupUserScripts(userContentController: WKUserContentController, env: [String: Any] = [:]) {
+        // Convert the dictionary to a JSON string
+        var envJsonString = "{}"
+        if let jsonData = try? JSONSerialization.data(withJSONObject: env, options: []),
+           let jsonString = String(data: jsonData, encoding: .utf8) {
+            envJsonString = jsonString
+        }
+
         // First inject ENV
         let envScript = WKUserScript(
-            source: "window.env = \(envJson);",
+            source: "window.env = \(envJsonString);",
             injectionTime: .atDocumentStart,
-            forMainFrameOnly: true
-        )
+    forMainFrameOnly: true
+)
         
         // Then inject app API
         let appScript = WKUserScript(

@@ -21,7 +21,8 @@ htmlpopup [OPTIONS] <html_content_or_file|directory|url|stdin>
 *   `--title <title>`: Set the window title.
 *   `--width <width>`: Set the window width (default: 800).
 *   `--height <height>`: Set the window height (default: 600).
-*   `--env <json_string>`: Provide a JSON string to be injected as `window.env` in the web view.
+*   `--env <json_string>`: Provide a JSON string to be injected as `window.env` in the web view. This is useful for complex JSON structures.
+*   `--env.<key> <value>`: Provide individual key-value pairs to be injected as `window.env`. Values are parsed as JSON (e.g., `true`, `123`, `"string"`, `[1,2]`, `{"a":1}`) if possible, otherwise they are treated as plain strings, but can be forced as string by quoting it `"str"`. This option can be used multiple times to set multiple environment variables.
 *   `--version`: Display the application version.
 
 ### Examples:
@@ -46,7 +47,10 @@ htmlpopup ./static/
 htmlpopup --width 1024 --height 768 --title "My Custom Window" my_page.html
 
 # Inject environment variables
-htmlpopup --env '{"API_KEY": "123", "DEBUG": true}' my_app.html
+# Inject environment variables
+htmlpopup --env '{"API_KEY": "old_key"}' --env.API_KEY "new_key" --env.DEBUG true --env.COUNT 123 --env.LIST '[1,2,3]' my_app.html
+# In the above example, --env.API_KEY will override the API_KEY from --env.
+# window.env will be: { "API_KEY": "new_key", "DEBUG": true, "COUNT": 123, "LIST": [1,2,3] }
 ```
 
 
