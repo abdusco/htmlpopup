@@ -187,12 +187,14 @@ class WindowController: NSWindowController, NSWindowDelegate {
         window.level = .floating  // Window starts as floating
         window.center()
         
-        window.appearance = NSAppearance(named: .aqua)
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         window.isReleasedWhenClosed = false
         
         super.init(window: window)
         window.delegate = self
+        
+        // Set initial appearance based on system theme
+        updateWindowAppearance(window)
         
         setupPinButton()
         setupKeyEventMonitor()
@@ -259,6 +261,14 @@ class WindowController: NSWindowController, NSWindowDelegate {
             NSEvent.removeMonitor(monitor)
         }
     }
+    
+    private func updateWindowAppearance(_ window: NSWindow) {
+        window.appearance = NSAppearance(named: .aqua)
+        if #available(macOS 10.14, *) {
+            let isDarkMode = NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+            window.appearance = NSAppearance(named: isDarkMode ? .darkAqua : .aqua)
+        }
+    }
 }
 
 class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKScriptMessageHandler {
@@ -266,6 +276,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKScri
     var webView: WKWebView?
     var closeString: String?
     let options: Options
+    private var themeObserver: NSKeyValueObservation?
 
     init(options: Options) {
         self.options = options
@@ -276,6 +287,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKScri
         NSApplication.shared.setActivationPolicy(.regular)
         setupMenuBar()
         setupWindowAndWebView()
+        setupThemeObserver()
     }
 
     private func setupMenuBar() {
@@ -319,6 +331,44 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKScri
         editMenu.addItem(NSMenuItem(title: "Select All", 
                                     action: #selector(NSText.selectAll(_:)), 
                                     keyEquivalent: "a"))
+    }
+
+    private func setupThemeObserver() {
+        if #available(macOS 10.14, *) {
+            themeObserver = NSApp.observe(\.effectiveAppearance) { [weak self] _, _ in
+                DispatchQueue.main.async {
+                    self?.handleThemeChange()
+                }
+            }
+        }
+    }
+    
+    private func handleThemeChange() {
+        guard let window = windowController?.window,
+              let webView = self.webView else { return }
+        
+        // Update window appearance
+        if #available(macOS 10.14, *) {
+            let isDarkMode = NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+            window.appearance = NSAppearance(named: isDarkMode ? .darkAqua : .aqua)
+            
+            // Notify web content about theme change
+            let themeScript = """
+                if (window.app && window.app.onThemeChange) {
+                    window.app.onThemeChange('\(isDarkMode ? "dark" : "light")');
+                }
+                // Also dispatch a custom event for more flexibility
+                window.dispatchEvent(new CustomEvent('themechange', { 
+                    detail: { theme: '\(isDarkMode ? "dark" : "light")' } 
+                }));
+            """
+            
+            webView.evaluateJavaScript(themeScript) { _, error in
+                if let error = error {
+                    print("Error executing theme change script: \(error)")
+                }
+            }
+        }
     }
 
     private func setupWindowAndWebView() {
@@ -403,6 +453,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKScri
            let jsonString = String(data: jsonData, encoding: .utf8) {
             envJsonString = jsonString
         }
+        
+        // Get current theme state
+        let isDarkMode = NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        let currentTheme = isDarkMode ? "dark" : "light"
 
         // First inject ENV
         let envScript = WKUserScript(
@@ -415,6 +469,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKScri
         let appScript = WKUserScript(
             source: """
             window.app = {
+                theme: '\(currentTheme)',
+                onThemeChange: null,
                 finish: function(message) {
                     window.webkit.messageHandlers.app.postMessage({ action: "finish", message: message }); 
                 },
@@ -441,6 +497,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKScri
                     });
                 }
             };
+            
+            // Set initial theme class on document
+            document.addEventListener('DOMContentLoaded', function() {
+                document.documentElement.setAttribute('data-theme', window.app.theme);
+                document.documentElement.classList.toggle('dark', window.app.theme === 'dark');
+            });
+            
+            // Listen for theme changes
+            window.addEventListener('themechange', function(event) {
+                window.app.theme = event.detail.theme;
+                document.documentElement.setAttribute('data-theme', event.detail.theme);
+                document.documentElement.classList.toggle('dark', event.detail.theme === 'dark');
+            });
             """,
             injectionTime: .atDocumentStart,
             forMainFrameOnly: true
@@ -512,6 +581,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKScri
 
 
     func applicationWillTerminate(_ aNotification: Notification) {
+        themeObserver?.invalidate()
+        themeObserver = nil
+        
         if let closeMessage = closeString {
             print(closeMessage)
         }
