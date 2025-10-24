@@ -386,6 +386,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKScri
         config.preferences.setValue(true, forKey: "developerExtrasEnabled")
         config.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
         config.setValue(true, forKey: "allowUniversalAccessFromFileURLs")
+        
+        // JavaScript is enabled by default in modern WebKit, but we ensure it's available
+        if #available(macOS 11.0, *) {
+            config.defaultWebpagePreferences.allowsContentJavaScript = true
+        } else {
+            config.preferences.javaScriptEnabled = true
+        }
+        
+        // Configure websiteDataStore for localStorage support
+        // Use default data store which supports localStorage
+        config.websiteDataStore = WKWebsiteDataStore.default()
+        
         if #available(macOS 11.0, *) {
             config.limitsNavigationsToAppBoundDomains = false
         }
