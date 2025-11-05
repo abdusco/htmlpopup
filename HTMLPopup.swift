@@ -470,12 +470,103 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKScri
         let isDarkMode = NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
         let currentTheme = isDarkMode ? "dark" : "light"
 
+        let defaultThemeCSS = """
+:root {
+    color-scheme: light dark;
+    --htmlpopup-background: #ffffff;
+    --htmlpopup-text: #1c1c1e;
+    --htmlpopup-border: #d1d1d6;
+    --htmlpopup-surface: rgba(249, 249, 251, 0.9);
+    --htmlpopup-link: #0a84ff;
+    --htmlpopup-muted: #6e6e73;
+}
+
+:root[data-theme='dark'],
+.dark {
+    color-scheme: dark;
+    --htmlpopup-background: #1c1c1e;
+    --htmlpopup-text: #f5f5f7;
+    --htmlpopup-border: #2c2c2e;
+    --htmlpopup-surface: rgba(44, 44, 46, 0.85);
+    --htmlpopup-link: #63a4ff;
+    --htmlpopup-muted: #8e8e93;
+}
+
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    padding: 24px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    line-height: 1.6;
+    background-color: var(--htmlpopup-background);
+    color: var(--htmlpopup-text);
+}
+
+a {
+    color: var(--htmlpopup-link);
+}
+
+button {
+    background-color: var(--htmlpopup-link);
+    color: #ffffff;
+    border: none;
+    border-radius: 6px;
+    padding: 9px 18px;
+    font-size: 15px;
+    cursor: pointer;
+}
+
+button:disabled {
+    opacity: 0.6;
+    cursor: default;
+}
+
+input,
+textarea,
+select {
+    background-color: var(--htmlpopup-surface);
+    color: var(--htmlpopup-text);
+    border: 1px solid var(--htmlpopup-border);
+    border-radius: 6px;
+    padding: 8px 10px;
+}
+
+code,
+pre {
+    background-color: var(--htmlpopup-surface);
+    color: var(--htmlpopup-text);
+    border: 1px solid var(--htmlpopup-border);
+    border-radius: 4px;
+    padding: 2px 6px;
+}
+"""
+
         // First inject ENV
         let envScript = WKUserScript(
             source: "window.env = \(envJsonString);",
             injectionTime: .atDocumentStart,
-    forMainFrameOnly: true
-)
+            forMainFrameOnly: true
+        )
+
+        // Provide baseline theming tokens so content inherits light/dark styling automatically.
+        let cssInjectionScript = WKUserScript(
+            source: """
+                (function() {
+                    if (document.getElementById('htmlpopup-theme-style')) { return; }
+                    const css = `\(defaultThemeCSS)`;
+                    const style = document.createElement('style');
+                    style.id = 'htmlpopup-theme-style';
+                    style.type = 'text/css';
+                    style.textContent = css;
+                    (document.head || document.documentElement).appendChild(style);
+                })();
+            """,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true
+        )
         
         // Then inject app API
         let appScript = WKUserScript(
@@ -528,6 +619,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKScri
         )
         
         userContentController.addUserScript(envScript)
+        userContentController.addUserScript(cssInjectionScript)
         userContentController.addUserScript(appScript)
     }
 
