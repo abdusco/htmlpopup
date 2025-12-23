@@ -1,5 +1,6 @@
 import Cocoa
 import WebKit
+import CommonCrypto
 
 func logError(_ message: String) {
     fputs("ERROR: \(message)\n", stderr)
@@ -26,6 +27,7 @@ struct Options {
     var height: CGFloat = 600
     var env: [String: Any] = [:] // Default empty dictionary
     var staticDirectory: String? = nil
+    var storageID: String? = nil
 }
 
 var currentVersion = "dev" // Default version, will be overridden by build system
@@ -61,8 +63,9 @@ func parseArguments() throws -> Options {
     var options = Options()
     let args = Array(CommandLine.arguments.dropFirst())
     var envArgs: [String: Any] = [:]
+    var parsingFlags = true
 
-    // First pass: Check for --version or --help flag
+    // 1. Fast path for global flags
     if args.contains("--version") {
         print("htmlpopup version: \(currentVersion)")
         exit(0)
@@ -74,13 +77,20 @@ func parseArguments() throws -> Options {
 
     var argIterator = args.makeIterator()
     while let arg = argIterator.next() {
-        if arg.hasPrefix("--") {
+
+        // 2. Handle the "end of flags" marker --
+        if arg == "--" {
+            parsingFlags = false
+            continue
+        }
+
+        if parsingFlags && arg.hasPrefix("--") {
             if arg.hasPrefix("--env.") {
-                // Handle --env.KEY
                 let key = String(arg.dropFirst(6))
                 guard let valueString = argIterator.next() else {
                     throw ArgumentError(message: "Missing value for \(arg)")
                 }
+                // Attempt to parse value as JSON (e.g., numbers, booleans), fallback to string
                 if let data = valueString.data(using: .utf8),
                    let jsonValue = try? JSONSerialization.jsonObject(with: data, options: .allowFragments) {
                     envArgs[key] = jsonValue
@@ -92,58 +102,44 @@ func parseArguments() throws -> Options {
                     throw ArgumentError(message: "Missing value for \(arg)")
                 }
                 switch arg {
-                case "--title":
-                    options.title = value
-                case "--width":
-                    if let width = Double(value) {
-                        options.width = CGFloat(width)
-                    } else {
-                        throw ArgumentError(message: "Invalid width value: \(value)")
-                    }
-                case "--height":
-                    if let height = Double(value) {
-                        options.height = CGFloat(height)
-                    } else {
-                        throw ArgumentError(message: "Invalid height value: \(value)")
-                    }
+                case "--id":     options.storageID = value
+                case "--title":  options.title = value
+                case "--width":  options.width = CGFloat(Double(value) ?? 800)
+                case "--height": options.height = CGFloat(Double(value) ?? 600)
                 case "--env":
-                    if let data = value.data(using: .utf8) {
-                        let json = try? JSONSerialization.jsonObject(with: data)
-                        if let dict = json as? [String: Any] {
-                            options.env = dict // This will be merged with envArgs later
-                        } else {
-                            throw ArgumentError(message: "The JSON string for --env must be an object/dictionary: \(value)")
-                        }
+                    if let data = value.data(using: .utf8),
+                       let dict = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+                        options.env = dict
                     } else {
-                        throw ArgumentError(message: "Invalid JSON string for --env: \(value)")
+                        throw ArgumentError(message: "Invalid JSON for --env")
                     }
                 default:
                     throw ArgumentError(message: "Unknown option: \(arg)")
                 }
             }
         } else {
-            // It's not a flag, so it must be the content argument
+            // 3. Handle Content Argument
             if options.html.isEmpty && options.url == nil && options.staticDirectory == nil {
-                let contentArg = arg
-                if contentArg == "-" {
+                if arg == "-" {
                     options.html = readStdin()
-                } else if (try? FileManager.default.attributesOfItem(atPath: contentArg)[.type] as? FileAttributeType) == .typeDirectory {
-                    let indexPath = (contentArg as NSString).appendingPathComponent("index.html")
-                    if FileManager.default.fileExists(atPath: indexPath) {
-                        options.staticDirectory = contentArg
-                    } else {
-                        throw ArgumentError(message: "The static directory does not contain an index.html file: \(contentArg)")
-                    }
-                } else if FileManager.default.fileExists(atPath: contentArg) {
-                    do {
-                        options.html = try String(contentsOfFile: contentArg, encoding: .utf8)
-                    } catch {
-                        throw ArgumentError(message: "Error reading file: \(error)")
-                    }
-                } else if let url = URL(string: contentArg), let scheme = url.scheme?.lowercased(), (scheme == "http" || scheme == "https") {
+                } else if let url = URL(string: arg), let scheme = url.scheme?.lowercased(), ["http", "https"].contains(scheme) {
                     options.url = url
                 } else {
-                    options.html = contentArg
+                    // Check if it is a directory or file
+                    var isDir: ObjCBool = false
+                    if FileManager.default.fileExists(atPath: arg, isDirectory: &isDir) {
+                        if isDir.boolValue {
+                            options.staticDirectory = arg // Allowed even without index.html now
+                        } else {
+                            options.html = try String(contentsOfFile: arg, encoding: .utf8)
+                        }
+                    } else {
+                        // If it ends in .html but doesn't exist, warn the user
+                        if arg.hasSuffix(".html") || arg.hasSuffix(".htm") {
+                            logError("Warning: '\(arg)' looks like a file but was not found. Treating as raw string.")
+                        }
+                        options.html = arg
+                    }
                 }
             } else {
                 throw ArgumentError(message: "Unexpected argument: \(arg)")
@@ -151,17 +147,23 @@ func parseArguments() throws -> Options {
         }
     }
 
-    // Merge envArgs into env, prioritizing envArgs
     options.env = options.env.merging(envArgs) { (_, new) in new }
 
-    // Ensure content argument was provided
     guard !(options.html.isEmpty && options.url == nil && options.staticDirectory == nil) else {
-        throw ArgumentError(message: "Missing content argument")
+        throw ArgumentError(message: "No content provided (HTML string, file, or URL).")
     }
-    
+
     return options
 }
 
+func stableUUID(from string: String) -> UUID {
+    let data = Data(string.utf8)
+    var hash = [UInt8](repeating: 0, count: Int(CC_SHA256_DIGEST_LENGTH))
+    data.withUnsafeBytes { _ = CC_SHA256($0.baseAddress, CC_LONG(data.count), &hash) }
+    // Use first 16 bytes for UUID
+    return UUID(uuid: (hash[0], hash[1], hash[2], hash[3], hash[4], hash[5], hash[6], hash[7],
+                       hash[8], hash[9], hash[10], hash[11], hash[12], hash[13], hash[14], hash[15]))
+}
 
 class WindowController: NSWindowController, NSWindowDelegate {
     private var pinButton: NSButton!
@@ -174,7 +176,7 @@ class WindowController: NSWindowController, NSWindowDelegate {
             updatePinButtonImage()
         }
     }
-    
+
     init(width: CGFloat, height: CGFloat, title: String) {
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: width, height: height),
@@ -182,33 +184,33 @@ class WindowController: NSWindowController, NSWindowDelegate {
             backing: .buffered,
             defer: false
         )
-        
+
         window.title = title
         window.level = .floating  // Window starts as floating
         window.center()
-        
+
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         window.isReleasedWhenClosed = false
-        
+
         super.init(window: window)
         window.delegate = self
-        
+
         // Set initial appearance based on system theme
         updateWindowAppearance(window)
-        
+
         setupPinButton()
         setupKeyEventMonitor()
     }
-    
+
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
     }
-    
+
     private var keyEventMonitor: Any?
-    
+
     private func setupPinButton() {
         guard let window = self.window else { return }
-        
+
         pinButton = NSButton(frame: NSRect(x: 0, y: 0, width: 16, height: 16))
         pinButton.bezelStyle = .texturedRounded
         pinButton.isBordered = false
@@ -218,31 +220,31 @@ class WindowController: NSWindowController, NSWindowDelegate {
         pinButton.toolTip = "Keep window floating on top"
         pinButton.target = self
         pinButton.action = #selector(togglePin)
-        
+
         // Position the button in the titlebar
         if let titlebarView = window.standardWindowButton(.closeButton)?.superview {
             titlebarView.addSubview(pinButton)
-            
+
             if let closeButton = window.standardWindowButton(.closeButton) {
                 let margin: CGFloat = 6
                 let pinButtonX = titlebarView.frame.width - pinButton.frame.width - margin
                 let pinButtonY = closeButton.frame.minY
-                
+
                 pinButton.frame.origin = CGPoint(x: pinButtonX, y: pinButtonY)
                 pinButton.autoresizingMask = [.minXMargin]
             }
         }
     }
-    
+
     private func updatePinButtonImage() {
         let imageName = isPinned ? "pin.fill" : "pin"
         pinButton.image = NSImage(systemSymbolName: imageName, accessibilityDescription: isPinned ? "Unpin Window" : "Pin Window")
     }
-    
+
     @objc private func togglePin() {
         isPinned.toggle()
     }
-    
+
     // Set up a local key event monitor that will detect ESC key presses
     private func setupKeyEventMonitor() {
         keyEventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
@@ -255,13 +257,13 @@ class WindowController: NSWindowController, NSWindowDelegate {
             return event // Pass other events through
         }
     }
-    
+
     deinit {
         if let monitor = keyEventMonitor {
             NSEvent.removeMonitor(monitor)
         }
     }
-    
+
     private func updateWindowAppearance(_ window: NSWindow) {
         window.appearance = NSAppearance(named: .aqua)
         if #available(macOS 10.14, *) {
@@ -299,37 +301,37 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKScri
         let fileMenu = NSMenu(title: "File")
         fileMenuItem.submenu = fileMenu
 
-        fileMenu.addItem(NSMenuItem(title: "Close Window", 
-                                    action: #selector(NSWindow.performClose(_:)), 
+        fileMenu.addItem(NSMenuItem(title: "Close Window",
+                                    action: #selector(NSWindow.performClose(_:)),
                                     keyEquivalent: "w"))
         fileMenu.addItem(NSMenuItem.separator())
-        fileMenu.addItem(NSMenuItem(title: "Quit", 
-                                    action: #selector(NSApplication.terminate(_:)), 
+        fileMenu.addItem(NSMenuItem(title: "Quit",
+                                    action: #selector(NSApplication.terminate(_:)),
                                     keyEquivalent: "q"))
 
         let editMenuItem = NSMenuItem()
         menuBar.addItem(editMenuItem)
         let editMenu = NSMenu(title: "Edit")
         editMenuItem.submenu = editMenu
-        
-        editMenu.addItem(NSMenuItem(title: "Undo", 
-                                    action: Selector(("undo:")), 
+
+        editMenu.addItem(NSMenuItem(title: "Undo",
+                                    action: Selector(("undo:")),
                                     keyEquivalent: "z"))
-        editMenu.addItem(NSMenuItem(title: "Redo", 
-                                    action: Selector(("redo:")), 
+        editMenu.addItem(NSMenuItem(title: "Redo",
+                                    action: Selector(("redo:")),
                                     keyEquivalent: "Z"))
         editMenu.addItem(NSMenuItem.separator())
-        editMenu.addItem(NSMenuItem(title: "Cut", 
-                                    action: #selector(NSText.cut(_:)), 
+        editMenu.addItem(NSMenuItem(title: "Cut",
+                                    action: #selector(NSText.cut(_:)),
                                     keyEquivalent: "x"))
-        editMenu.addItem(NSMenuItem(title: "Copy", 
-                                    action: #selector(NSText.copy(_:)), 
+        editMenu.addItem(NSMenuItem(title: "Copy",
+                                    action: #selector(NSText.copy(_:)),
                                     keyEquivalent: "c"))
-        editMenu.addItem(NSMenuItem(title: "Paste", 
-                                    action: #selector(NSText.paste(_:)), 
+        editMenu.addItem(NSMenuItem(title: "Paste",
+                                    action: #selector(NSText.paste(_:)),
                                     keyEquivalent: "v"))
-        editMenu.addItem(NSMenuItem(title: "Select All", 
-                                    action: #selector(NSText.selectAll(_:)), 
+        editMenu.addItem(NSMenuItem(title: "Select All",
+                                    action: #selector(NSText.selectAll(_:)),
                                     keyEquivalent: "a"))
     }
 
@@ -342,27 +344,27 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKScri
             }
         }
     }
-    
+
     private func handleThemeChange() {
         guard let window = windowController?.window,
               let webView = self.webView else { return }
-        
+
         // Update window appearance
         if #available(macOS 10.14, *) {
             let isDarkMode = NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
             window.appearance = NSAppearance(named: isDarkMode ? .darkAqua : .aqua)
-            
+
             // Notify web content about theme change
             let themeScript = """
                 if (window.app && window.app.onThemeChange) {
                     window.app.onThemeChange('\(isDarkMode ? "dark" : "light")');
                 }
                 // Also dispatch a custom event for more flexibility
-                window.dispatchEvent(new CustomEvent('themechange', { 
-                    detail: { theme: '\(isDarkMode ? "dark" : "light")' } 
+                window.dispatchEvent(new CustomEvent('themechange', {
+                    detail: { theme: '\(isDarkMode ? "dark" : "light")' }
                 }));
             """
-            
+
             webView.evaluateJavaScript(themeScript) { _, error in
                 if let error = error {
                     print("Error executing theme change script: \(error)")
@@ -381,25 +383,28 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKScri
         let userContentController = WKUserContentController()
         userContentController.add(self, name: "app")
         setupUserScripts(userContentController: userContentController, env: options.env)
+
         let config = WKWebViewConfiguration()
         config.userContentController = userContentController
+
+        // 1. GENERATE UNIQUE ORIGIN
+        // We use http://[ID].local. WebKit treats this as a standard web origin,
+        // which guarantees localStorage partitioning by hostname.
+        let identifierSource = options.storageID ?? options.staticDirectory ?? options.url?.absoluteString ?? "default"
+        let safeID = identifierSource.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? "data"
+        let dummyOrigin = URL(string: "http://\(safeID).local")!
+
+        // 2. CONFIGURE PERSISTENCE
+        config.websiteDataStore = WKWebsiteDataStore.default()
+
         config.preferences.setValue(true, forKey: "developerExtrasEnabled")
         config.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
         config.setValue(true, forKey: "allowUniversalAccessFromFileURLs")
-        
-        // JavaScript is enabled by default in modern WebKit, but we ensure it's available
+
         if #available(macOS 11.0, *) {
             config.defaultWebpagePreferences.allowsContentJavaScript = true
         } else {
             config.preferences.javaScriptEnabled = true
-        }
-        
-        // Configure websiteDataStore for localStorage support
-        // Use default data store which supports localStorage
-        config.websiteDataStore = WKWebsiteDataStore.default()
-        
-        if #available(macOS 11.0, *) {
-            config.limitsNavigationsToAppBoundDomains = false
         }
 
         guard let contentView = windowController?.window?.contentView else {
@@ -417,44 +422,59 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKScri
             webView.setValue(false, forKey: "drawsBackground")
         }
 
+        // 3. LOAD CONTENT
         if let staticDir = options.staticDirectory {
             let dirURL = URL(fileURLWithPath: staticDir, isDirectory: true)
             let indexURL = dirURL.appendingPathComponent("index.html")
-            if FileManager.default.fileExists(atPath: indexURL.path) {
-                webView.loadFileURL(indexURL, allowingReadAccessTo: dirURL)
+
+            // If an ID is provided, we MUST load as a string with the dummyOrigin
+            // to force partitioning. Otherwise, it uses the file:// origin.
+            if options.storageID != nil, let html = try? String(contentsOf: indexURL) {
+                webView.loadHTMLString(html, baseURL: dummyOrigin)
             } else {
-                logFatalError("The static directory does not contain an index.html file.")
+                webView.loadFileURL(indexURL, allowingReadAccessTo: dirURL)
             }
         } else if let url = options.url {
             webView.load(URLRequest(url: url))
         } else if !options.html.isEmpty {
-            webView.loadHTMLString(options.html, baseURL: nil)
-        } else {
-            logFatalError("No content to load.")
+            // Load raw string with our partitioned origin
+            webView.loadHTMLString(options.html, baseURL: dummyOrigin)
         }
 
         contentView.addSubview(webView)
-
         windowController?.showWindow(nil)
         NSApplication.shared.activate(ignoringOtherApps: true)
         windowController?.window?.makeKeyAndOrderFront(nil)
     }
 
-    func webView(_ webView: WKWebView, 
+    func webView(_ webView: WKWebView,
                 decidePolicyFor navigationAction: WKNavigationAction,
                 decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+
         if let url = navigationAction.request.url {
-            // Allow only http, https, about, and file schemes in the webview
-            if let scheme = url.scheme?.lowercased(),
-                scheme != "http" && scheme != "https" && scheme != "about" && scheme != "file" {
-                // Handle external protocol
-                if !NSWorkspace.shared.open(url) {
-                    logError("Failed to open URL: \(url)")
-                }
-                decisionHandler(.cancel)
+            let host = url.host?.lowercased() ?? ""
+            let scheme = url.scheme?.lowercased() ?? ""
+
+            // 1. Allow our internal partitioned origins
+            if host.hasSuffix(".local") {
+                decisionHandler(.allow)
                 return
             }
+
+            // 2. Allow standard web/file schemes
+            if ["http", "https", "about", "file"].contains(scheme) {
+                decisionHandler(.allow)
+                return
+            }
+
+            // 3. Hand off external protocols (mailto, slack, etc) to the system
+            if !NSWorkspace.shared.open(url) {
+                logError("Failed to open URL: \(url)")
+            }
+            decisionHandler(.cancel)
+            return
         }
+
         decisionHandler(.allow)
     }
 
@@ -465,7 +485,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKScri
            let jsonString = String(data: jsonData, encoding: .utf8) {
             envJsonString = jsonString
         }
-        
+
         // Get current theme state
         let isDarkMode = NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
         let currentTheme = isDarkMode ? "dark" : "light"
@@ -492,55 +512,26 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKScri
     --htmlpopup-muted: #8e8e93;
 }
 
-* {
-    box-sizing: border-box;
-}
-
 body {
-    margin: 0;
-    padding: 24px;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    line-height: 1.6;
     background-color: var(--htmlpopup-background);
     color: var(--htmlpopup-text);
 }
 
-a {
-    color: var(--htmlpopup-link);
-}
-
-button {
-    background-color: var(--htmlpopup-link);
-    color: #ffffff;
-    border: none;
-    border-radius: 6px;
-    padding: 9px 18px;
-    font-size: 15px;
+a, button {
+    color: inherit;
     cursor: pointer;
-}
-
-button:disabled {
-    opacity: 0.6;
-    cursor: default;
 }
 
 input,
 textarea,
 select {
-    background-color: var(--htmlpopup-surface);
-    color: var(--htmlpopup-text);
-    border: 1px solid var(--htmlpopup-border);
-    border-radius: 6px;
-    padding: 8px 10px;
+    color: inherit;
 }
 
 code,
 pre {
-    background-color: var(--htmlpopup-surface);
-    color: var(--htmlpopup-text);
-    border: 1px solid var(--htmlpopup-border);
-    border-radius: 4px;
-    padding: 2px 6px;
+    color: inherit;
 }
 """
 
@@ -567,7 +558,7 @@ pre {
             injectionTime: .atDocumentStart,
             forMainFrameOnly: true
         )
-        
+
         // Then inject app API
         let appScript = WKUserScript(
             source: """
@@ -575,16 +566,16 @@ pre {
                 theme: '\(currentTheme)',
                 onThemeChange: null,
                 finish: function(message) {
-                    window.webkit.messageHandlers.app.postMessage({ action: "finish", message: message }); 
+                    window.webkit.messageHandlers.app.postMessage({ action: "finish", message: message });
                 },
                 setSize: function(width, height) {
-                    window.webkit.messageHandlers.app.postMessage({ action: "setSize", width: width, height: height }); 
+                    window.webkit.messageHandlers.app.postMessage({ action: "setSize", width: width, height: height });
                 },
                 setFullscreen: function(enabled) {
-                    window.webkit.messageHandlers.app.postMessage({ action: "setFullscreen", enabled: enabled }); 
+                    window.webkit.messageHandlers.app.postMessage({ action: "setFullscreen", enabled: enabled });
                 },
                 setFloating: function(enabled) {
-                    window.webkit.messageHandlers.app.postMessage({ action: "setFloating", enabled: enabled }); 
+                    window.webkit.messageHandlers.app.postMessage({ action: "setFloating", enabled: enabled });
                 },
                 selectFolder: function() {
                     return new Promise((resolve, reject) => {
@@ -593,20 +584,20 @@ pre {
                             resolve: resolve,
                             reject: reject
                         };
-                        window.webkit.messageHandlers.app.postMessage({ 
+                        window.webkit.messageHandlers.app.postMessage({
                             action: "selectFolder",
                             callbackId: callbackId
                         });
                     });
                 }
             };
-            
+
             // Set initial theme class on document
             document.addEventListener('DOMContentLoaded', function() {
                 document.documentElement.setAttribute('data-theme', window.app.theme);
                 document.documentElement.classList.toggle('dark', window.app.theme === 'dark');
             });
-            
+
             // Listen for theme changes
             window.addEventListener('themechange', function(event) {
                 window.app.theme = event.detail.theme;
@@ -617,7 +608,7 @@ pre {
             injectionTime: .atDocumentStart,
             forMainFrameOnly: true
         )
-        
+
         userContentController.addUserScript(envScript)
         userContentController.addUserScript(cssInjectionScript)
         userContentController.addUserScript(appScript)
@@ -654,10 +645,10 @@ pre {
         openPanel.canChooseFiles = false
         openPanel.allowsMultipleSelection = false
         openPanel.level = .floating + 1
-        
+
         openPanel.begin { [weak self] response in
             guard let webView = self?.webView else { return }
-            
+
             if response == .OK {
                 if let url = openPanel.url {
                     let path = url.path
@@ -687,7 +678,7 @@ pre {
     func applicationWillTerminate(_ aNotification: Notification) {
         themeObserver?.invalidate()
         themeObserver = nil
-        
+
         if let closeMessage = closeString {
             print(closeMessage)
         }
@@ -716,7 +707,7 @@ pre {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         return true
     }
-    
+
     private func generateDirectoryListing(for directory: URL) -> String {
         do {
             let contents = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
@@ -738,12 +729,12 @@ pre {
                 <h1>Directory Listing</h1>
                 <ul>
             """
-            
+
             for item in contents {
                 let name = item.lastPathComponent
                 html += "<li><a href=\"\(name)\">\(name)</a></li>\n"
             }
-            
+
             html += """
                 </ul>
             </body>
@@ -759,7 +750,7 @@ pre {
 extension WKWebView {
     func toggleInspector(_ sender: Any?) {
         guard responds(to: Selector(("_inspector"))) else { return }
-        
+
         let inspector = value(forKey: "_inspector") as AnyObject
         let selector = Selector(("show:"))
         if inspector.responds(to: selector) {
