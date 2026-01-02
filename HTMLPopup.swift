@@ -577,6 +577,9 @@ pre {
                 setFloating: function(enabled) {
                     window.webkit.messageHandlers.app.postMessage({ action: "setFloating", enabled: enabled });
                 },
+                setTitle: function(title) {
+                    window.webkit.messageHandlers.app.postMessage({ action: "setTitle", title: title });
+                },
                 selectFolder: function() {
                     return new Promise((resolve, reject) => {
                         const callbackId = 'callback_' + Math.random().toString(36).substr(2, 9);
@@ -628,6 +631,10 @@ pre {
                     appSetFullscreen(messageBody["enabled"] as? Bool ?? false)
                 case "setFloating":
                     appSetFloating(messageBody["enabled"] as? Bool ?? false)
+                case "setTitle":
+                    if let title = messageBody["title"] as? String {
+                        appSetTitle(title)
+                    }
                 case "selectFolder":
                     if let callbackId = messageBody["callbackId"] as? String {
                         appSelectFolder(callbackId: callbackId)
@@ -702,6 +709,10 @@ pre {
 
     func appSetFloating(_ enabled: Bool) {
         windowController?.isPinned.toggle()
+    }
+
+    func appSetTitle(_ title: String) {
+        windowController?.window?.title = title
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
