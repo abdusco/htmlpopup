@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>API Test</title>
+    <style>
+        body { padding: 20px; }
+        button { margin: 5px; padding: 8px; }
+        #output { margin-top: 20px; white-space: pre-wrap; border: 1px solid #ccc; padding: 10px; }
+    </style>
+</head>
+<body>
+    <h1>API Test</h1>
+    <button onclick="testSetTitle()">Set Title</button>
+    <button onclick="testFloating(true)">Float On</button>
+    <button onclick="testFloating(false)">Float Off</button>
+    <button onclick="testFullscreen(true)">Fullscreen On</button>
+    <button onclick="testFullscreen(false)">Fullscreen Off</button>
+    <button onclick="testSelectFolder()">Select Folder</button>
+    <button onclick="testSelectFile()">Select File</button>
+    <button onclick="testSaveFile()">Save File</button>
+    <button onclick="testRevealInFinder()">Reveal /tmp</button>
+    <button onclick="window.app.finish('Done!')">Finish</button>
+
+    <div id="output">Results will appear here...</div>
+
+    <script>
+        const output = document.getElementById('output');
+        function log(msg) {
+            output.textContent = msg + '\n' + output.textContent;
+            console.log(msg);
+        }
+
+        function testSetTitle() {
+            window.app.setTitle("New Title: " + new Date().toLocaleTimeString());
+        }
+
+        function testFloating(on) {
+            window.app.setFloating(on);
+            log("Floating set to: " + on);
+        }
+
+        function testFullscreen(on) {
+            window.app.setFullscreen(on);
+            log("Fullscreen set to: " + on);
+        }
+
+        async function testSelectFolder() {
+            try {
+                const path = await window.app.selectFolder();
+                log("Selected folder: " + path);
+            } catch (e) {
+                log("Folder selection error: " + e);
+            }
+        }
+
+        async function testSelectFile() {
+            try {
+                const path = await window.app.selectFile({ allowedFileTypes: ['txt', 'html'] });
+                log("Selected file: " + path);
+            } catch (e) {
+                log("File selection error: " + e);
+            }
+        }
+
+        async function testSaveFile() {
+            try {
+                const path = await window.app.saveFile("Hello from HTMLPopup!", "test.txt");
+                log("Saved file to: " + path);
+            } catch (e) {
+                log("Save file error: " + e);
+            }
+        }
+
+        function testRevealInFinder() {
+            window.app.revealInFinder("/tmp");
+            log("Revealing /tmp in Finder");
+        }
+    </script>
+</body>
+</html>

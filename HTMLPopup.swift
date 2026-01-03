@@ -1,6 +1,7 @@
 import Cocoa
 import WebKit
 import CommonCrypto
+import UniformTypeIdentifiers
 
 func logError(_ message: String) {
     fputs("ERROR: \(message)\n", stderr)
@@ -191,7 +192,8 @@ class WindowController: NSWindowController, NSWindowDelegate {
         window.level = .floating  // Window starts as floating
         window.center()
 
-        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        // Added .fullScreenPrimary to support standard macOS fullscreen behavior
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .fullScreenPrimary]
         window.isReleasedWhenClosed = false
 
         super.init(window: window)
@@ -603,24 +605,47 @@ pre {
                     window.webkit.messageHandlers.app.postMessage({ action: "setSize", width: width, height: height });
                 },
                 setFullscreen: function(enabled) {
-                    window.webkit.messageHandlers.app.postMessage({ action: "setFullscreen", enabled: enabled });
+                    window.webkit.messageHandlers.app.postMessage({ action: "setFullscreen", enabled: !!enabled });
                 },
                 setFloating: function(enabled) {
-                    window.webkit.messageHandlers.app.postMessage({ action: "setFloating", enabled: enabled });
+                    window.webkit.messageHandlers.app.postMessage({ action: "setFloating", enabled: !!enabled });
                 },
                 setTitle: function(title) {
                     window.webkit.messageHandlers.app.postMessage({ action: "setTitle", title: title });
                 },
+                revealInFinder: function(path) {
+                    window.webkit.messageHandlers.app.postMessage({ action: "revealInFinder", path: path });
+                },
                 selectFolder: function() {
                     return new Promise((resolve, reject) => {
                         const callbackId = 'callback_' + Math.random().toString(36).substr(2, 9);
-                        window[callbackId] = {
-                            resolve: resolve,
-                            reject: reject
-                        };
+                        window[callbackId] = { resolve: resolve, reject: reject };
                         window.webkit.messageHandlers.app.postMessage({
                             action: "selectFolder",
                             callbackId: callbackId
+                        });
+                    });
+                },
+                selectFile: function(options = {}) {
+                    return new Promise((resolve, reject) => {
+                        const callbackId = 'callback_' + Math.random().toString(36).substr(2, 9);
+                        window[callbackId] = { resolve: resolve, reject: reject };
+                        window.webkit.messageHandlers.app.postMessage({
+                            action: "selectFile",
+                            callbackId: callbackId,
+                            options: options
+                        });
+                    });
+                },
+                saveFile: function(content, fileName) {
+                    return new Promise((resolve, reject) => {
+                        const callbackId = 'callback_' + Math.random().toString(36).substr(2, 9);
+                        window[callbackId] = { resolve: resolve, reject: reject };
+                        window.webkit.messageHandlers.app.postMessage({
+                            action: "saveFile",
+                            callbackId: callbackId,
+                            content: content,
+                            fileName: fileName
                         });
                     });
                 }
@@ -651,7 +676,9 @@ pre {
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         if message.name == "app" {
             if let messageBody = message.body as? [String: Any] {
-                switch messageBody["action"] as? String {
+                let action = messageBody["action"] as? String ?? "unknown"
+
+                switch action {
                 case "finish":
                     appFinish(messageBody["message"] as? String ?? "")
                 case "setSize":
@@ -670,8 +697,22 @@ pre {
                     if let callbackId = messageBody["callbackId"] as? String {
                         appSelectFolder(callbackId: callbackId)
                     }
+                case "selectFile":
+                    if let callbackId = messageBody["callbackId"] as? String {
+                        appSelectFile(callbackId: callbackId, options: messageBody["options"] as? [String: Any] ?? [:])
+                    }
+                case "saveFile":
+                    if let callbackId = messageBody["callbackId"] as? String {
+                        appSaveFile(callbackId: callbackId,
+                                   content: messageBody["content"] as? String ?? "",
+                                   fileName: messageBody["fileName"] as? String)
+                    }
+                case "revealInFinder":
+                    if let path = messageBody["path"] as? String {
+                        appRevealInFinder(path: path)
+                    }
                 default:
-                    logError("Unknown action: \(messageBody["action"] ?? "")")
+                    logError("Unknown action: \(action)")
                 }
             }
         }
@@ -684,34 +725,114 @@ pre {
         openPanel.allowsMultipleSelection = false
         openPanel.level = .floating + 1
 
-        openPanel.begin { [weak self] response in
-            guard let webView = self?.webView else { return }
+        let response = openPanel.runModal()
+        self.handleFileSelection(callbackId: callbackId, response: response, panel: openPanel)
+    }
 
-            if response == .OK {
-                if let url = openPanel.url {
-                    let path = url.path
-                    let jsCallback = """
-                        {
-                            const callback = window['\(callbackId)'];
-                            callback.resolve('\(path)');
-                            delete window['\(callbackId)'];
-                        }
-                    """
-                    webView.evaluateJavaScript(jsCallback)
-                }
+    func appSelectFile(callbackId: String, options: [String: Any]) {
+        let openPanel = NSOpenPanel()
+        openPanel.canChooseDirectories = options["canChooseDirectories"] as? Bool ?? false
+        openPanel.canChooseFiles = options["canChooseFiles"] as? Bool ?? true
+        openPanel.allowsMultipleSelection = options["allowsMultipleSelection"] as? Bool ?? false
+
+        if let allowedTypes = options["allowedFileTypes"] as? [String] {
+            if #available(macOS 11.0, *) {
+                let types = allowedTypes.compactMap { UTType(filenameExtension: $0) }
+                openPanel.allowedContentTypes = types
             } else {
+                openPanel.allowedFileTypes = allowedTypes
+            }
+        }
+
+        openPanel.level = .floating + 1
+
+        let response = openPanel.runModal()
+        self.handleFileSelection(callbackId: callbackId, response: response, panel: openPanel)
+    }
+
+    private func handleFileSelection(callbackId: String, response: NSApplication.ModalResponse, panel: NSOpenPanel) {
+        guard let webView = self.webView else { return }
+
+        if response == .OK {
+            let paths = panel.urls.map { $0.path }
+            let result: Any = (panel.allowsMultipleSelection) ? paths : (paths.first ?? "")
+
+            do {
+                let jsonData = try JSONSerialization.data(withJSONObject: [result], options: [])
+                guard let jsonArrayString = String(data: jsonData, encoding: .utf8) else { return }
+                let jsonString = String(jsonArrayString.dropFirst().dropLast())
+                
                 let jsCallback = """
-                    {
-                        const callback = window['\(callbackId)'];
-                        callback.reject('Folder selection cancelled');
+                (function() {
+                    const cb = window['\(callbackId)'];
+                    if (cb) {
+                        cb.resolve(\(jsonString));
                         delete window['\(callbackId)'];
                     }
+                })();
                 """
-                webView.evaluateJavaScript(jsCallback)
+                
+                DispatchQueue.main.async {
+                    webView.evaluateJavaScript(jsCallback) { _, error in
+                        if let error = error {
+                            logError("JS evaluation error: \(error.localizedDescription)")
+                        }
+                    }
+                }
+            } catch {
+                logError("JSON serialization error: \(error.localizedDescription)")
+            }
+        } else {
+            let jsCallback = "if(window['\(callbackId)']) { window['\(callbackId)'].reject('Cancelled'); delete window['\(callbackId)']; }"
+            DispatchQueue.main.async {
+                webView.evaluateJavaScript(jsCallback, completionHandler: nil)
             }
         }
     }
 
+    func appSaveFile(callbackId: String, content: String, fileName: String?) {
+        let savePanel = NSSavePanel()
+        if let fileName = fileName {
+            savePanel.nameFieldStringValue = fileName
+        }
+        savePanel.level = .floating + 1
+
+        let response = savePanel.runModal()
+        guard let webView = self.webView else { return }
+
+        if response == .OK, let url = savePanel.url {
+            do {
+                try content.write(to: url, atomically: true, encoding: .utf8)
+                let jsonData = try JSONSerialization.data(withJSONObject: [url.path], options: [])
+                let jsonPath = String(data: jsonData, encoding: .utf8)?.dropFirst().dropLast() ?? "\"\""
+                
+                let jsCallback = """
+                (function() {
+                    const cb = window['\(callbackId)'];
+                    if (cb) {
+                        cb.resolve(\(jsonPath));
+                        delete window['\(callbackId)'];
+                    }
+                })();
+                """
+                webView.evaluateJavaScript(jsCallback)
+            } catch {
+                let errString = error.localizedDescription
+                let jsonData = (try? JSONSerialization.data(withJSONObject: [errString], options: [])) ?? Data()
+                let jsonErr = String(data: jsonData, encoding: .utf8)?.dropFirst().dropLast() ?? "\"Error\""
+                
+                let jsCallback = "window['\(callbackId)'].reject(\(jsonErr)); delete window['\(callbackId)'];"
+                webView.evaluateJavaScript(jsCallback)
+            }
+        } else {
+            let jsCallback = "if(window['\(callbackId)']) { window['\(callbackId)'].reject('Cancelled'); delete window['\(callbackId)']; }"
+            webView.evaluateJavaScript(jsCallback)
+        }
+    }
+
+    func appRevealInFinder(path: String) {
+        NSWorkspace.shared.selectFile(path, inFileViewerRootedAtPath: "")
+    }
 
     func applicationWillTerminate(_ aNotification: Notification) {
         themeObserver?.invalidate()
@@ -735,11 +856,25 @@ pre {
 
     func appSetFullscreen(_ enabled: Bool) {
         guard let window = windowController?.window else { return }
-        window.toggleFullScreen(nil)
+        let isFullscreen = window.styleMask.contains(.fullScreen)
+        
+        if isFullscreen != enabled {
+            // If entering fullscreen, we should ensure window level is normal
+            // as floating windows can sometimes misbehave in fullscreen.
+            if enabled {
+                window.level = .normal
+            }
+            window.toggleFullScreen(nil)
+            
+            // Restore floating state if we are exiting fullscreen and it was pinned
+            if !enabled && (windowController?.isPinned ?? false) {
+                window.level = .floating
+            }
+        }
     }
 
     func appSetFloating(_ enabled: Bool) {
-        windowController?.isPinned.toggle()
+        windowController?.isPinned = enabled
     }
 
     func appSetTitle(_ title: String) {
@@ -801,12 +936,15 @@ extension WKWebView {
     }
 }
 
+// Global reference to prevent deallocation
+var appDelegate: AppDelegate?
+
 // Parse and validate arguments before launching the app
 do {
     let options = try parseArguments()
     let app = NSApplication.shared
-    let delegate = AppDelegate(options: options)
-    app.delegate = delegate
+    appDelegate = AppDelegate(options: options)
+    app.delegate = appDelegate
     app.run()
 } catch let error as ArgumentError {
     logError(error.message)
