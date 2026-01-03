@@ -417,18 +417,40 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKScri
             let dirURL = URL(fileURLWithPath: staticDir, isDirectory: true)
             let indexURL = dirURL.appendingPathComponent("index.html")
 
-            // If an ID is provided, we MUST load as a string with the dummyOrigin
-            // to force partitioning. Otherwise, it uses the file:// origin.
-            if options.storageID != nil, let html = try? String(contentsOf: indexURL) {
-                webView.loadHTMLString(html, baseURL: dummyOrigin)
+            if FileManager.default.fileExists(atPath: indexURL.path) {
+                if options.storageID != nil, var html = try? String(contentsOf: indexURL) {
+                    // Inject <base> tag to support relative paths while using a custom origin
+                    let baseTag = "<base href=\"\(dirURL.absoluteString)\">"
+                    if html.lowercased().contains("<head>") {
+                        html = html.replacingOccurrences(of: "<head>", with: "<head>\(baseTag)", options: .caseInsensitive)
+                    } else {
+                        html = "<head>\(baseTag)</head>" + html
+                    }
+                    webView.loadHTMLString(html, baseURL: dummyOrigin)
+                } else {
+                    webView.loadFileURL(indexURL, allowingReadAccessTo: dirURL)
+                }
             } else {
-                webView.loadFileURL(indexURL, allowingReadAccessTo: dirURL)
+                // Generate directory listing if index.html is missing
+                let html = generateDirectoryListing(for: dirURL)
+                webView.loadHTMLString(html, baseURL: dirURL)
             }
         } else if let url = options.url {
             webView.load(URLRequest(url: url))
         } else if !options.html.isEmpty {
-            // Load raw string with our partitioned origin
-            webView.loadHTMLString(options.html, baseURL: dummyOrigin)
+            if options.storageID != nil {
+                let currentDirURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+                let baseTag = "<base href=\"\(currentDirURL.absoluteString)\">"
+                var html = options.html
+                if html.lowercased().contains("<head>") {
+                    html = html.replacingOccurrences(of: "<head>", with: "<head>\(baseTag)", options: .caseInsensitive)
+                } else {
+                    html = "<head>\(baseTag)</head>" + html
+                }
+                webView.loadHTMLString(html, baseURL: dummyOrigin)
+            } else {
+                webView.loadHTMLString(options.html, baseURL: nil)
+            }
         }
 
         contentView.addSubview(webView)
