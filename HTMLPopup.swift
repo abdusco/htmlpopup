@@ -195,9 +195,6 @@ class WindowController: NSWindowController, NSWindowDelegate {
         super.init(window: window)
         window.delegate = self
 
-        // Set initial appearance based on system theme
-        updateWindowAppearance(window)
-
         setupPinButton()
         setupKeyEventMonitor()
     }
@@ -263,14 +260,6 @@ class WindowController: NSWindowController, NSWindowDelegate {
             NSEvent.removeMonitor(monitor)
         }
     }
-
-    private func updateWindowAppearance(_ window: NSWindow) {
-        window.appearance = NSAppearance(named: .aqua)
-        if #available(macOS 10.14, *) {
-            let isDarkMode = NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-            window.appearance = NSAppearance(named: isDarkMode ? .darkAqua : .aqua)
-        }
-    }
 }
 
 class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKScriptMessageHandler {
@@ -289,6 +278,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKScri
         NSApplication.shared.setActivationPolicy(.regular)
         setupMenuBar()
         setupWindowAndWebView()
+        handleThemeChange()
         setupThemeObserver()
     }
 
