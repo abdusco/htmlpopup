@@ -27,6 +27,7 @@ struct Options {
     var height: CGFloat = 600
     var env: [String: Any] = [:] // Default empty dictionary
     var staticDirectory: String? = nil
+    var filePath: String? = nil
     var storageID: String? = nil
 }
 
@@ -131,6 +132,7 @@ func parseArguments() throws -> Options {
                         if isDir.boolValue {
                             options.staticDirectory = arg // Allowed even without index.html now
                         } else {
+                            options.filePath = arg
                             options.html = try String(contentsOfFile: arg, encoding: .utf8)
                         }
                     } else {
@@ -383,6 +385,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKScri
         let identifierSource: String
         if let sid = options.storageID {
             identifierSource = sid
+        } else if let fp = options.filePath {
+            identifierSource = fp // Stable path, content can change
         } else if let sd = options.staticDirectory {
             identifierSource = sd
         } else if let url = options.url {
@@ -451,8 +455,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKScri
         } else if let url = options.url {
             webView.load(URLRequest(url: url))
         } else if !options.html.isEmpty {
-            let currentDirURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
-            let baseTag = "<base href=\"\(currentDirURL.absoluteString)\">"
+            let baseURL: URL
+            if let fp = options.filePath {
+                baseURL = URL(fileURLWithPath: fp).deletingLastPathComponent()
+            } else {
+                baseURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+            }
+
+            let baseTag = "<base href=\"\(baseURL.absoluteString)\">"
             var html = options.html
             if html.lowercased().contains("<head>") {
                 html = html.replacingOccurrences(of: "<head>", with: "<head>\(baseTag)", options: .caseInsensitive)
