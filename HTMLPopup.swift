@@ -378,11 +378,23 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKScri
         config.userContentController = userContentController
 
         // 1. GENERATE UNIQUE ORIGIN
-        // We use http://[ID].local. WebKit treats this as a standard web origin,
-        // which guarantees localStorage partitioning by hostname.
-        let identifierSource = options.storageID ?? options.staticDirectory ?? options.url?.absoluteString ?? "default"
-        let safeID = identifierSource.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? "data"
-        let dummyOrigin = URL(string: "http://\(safeID).local")!
+        // We use http://[ID].local to guarantee localStorage partitioning by hostname.
+        // We use a stable hash of the source to keep the hostname clean and consistent.
+        let identifierSource: String
+        if let sid = options.storageID {
+            identifierSource = sid
+        } else if let sd = options.staticDirectory {
+            identifierSource = sd
+        } else if let url = options.url {
+            identifierSource = url.absoluteString
+        } else if !options.html.isEmpty {
+            identifierSource = "html-" + stableUUID(from: options.html).uuidString
+        } else {
+            identifierSource = "default"
+        }
+
+        let hostID = stableUUID(from: identifierSource).uuidString.lowercased().replacingOccurrences(of: "-", with: "")
+        let dummyOrigin = URL(string: "http://\(hostID).local")!
 
         // 2. CONFIGURE PERSISTENCE
         config.websiteDataStore = WKWebsiteDataStore.default()
@@ -418,7 +430,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKScri
             let indexURL = dirURL.appendingPathComponent("index.html")
 
             if FileManager.default.fileExists(atPath: indexURL.path) {
-                if options.storageID != nil, var html = try? String(contentsOf: indexURL) {
+                if var html = try? String(contentsOf: indexURL) {
                     // Inject <base> tag to support relative paths while using a custom origin
                     let baseTag = "<base href=\"\(dirURL.absoluteString)\">"
                     if html.lowercased().contains("<head>") {
@@ -428,6 +440,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKScri
                     }
                     webView.loadHTMLString(html, baseURL: dummyOrigin)
                 } else {
+                    // Fallback to file URL if reading fails
                     webView.loadFileURL(indexURL, allowingReadAccessTo: dirURL)
                 }
             } else {
@@ -438,19 +451,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKScri
         } else if let url = options.url {
             webView.load(URLRequest(url: url))
         } else if !options.html.isEmpty {
-            if options.storageID != nil {
-                let currentDirURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
-                let baseTag = "<base href=\"\(currentDirURL.absoluteString)\">"
-                var html = options.html
-                if html.lowercased().contains("<head>") {
-                    html = html.replacingOccurrences(of: "<head>", with: "<head>\(baseTag)", options: .caseInsensitive)
-                } else {
-                    html = "<head>\(baseTag)</head>" + html
-                }
-                webView.loadHTMLString(html, baseURL: dummyOrigin)
+            let currentDirURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+            let baseTag = "<base href=\"\(currentDirURL.absoluteString)\">"
+            var html = options.html
+            if html.lowercased().contains("<head>") {
+                html = html.replacingOccurrences(of: "<head>", with: "<head>\(baseTag)", options: .caseInsensitive)
             } else {
-                webView.loadHTMLString(options.html, baseURL: nil)
+                html = "<head>\(baseTag)</head>" + html
             }
+            webView.loadHTMLString(html, baseURL: dummyOrigin)
         }
 
         contentView.addSubview(webView)
