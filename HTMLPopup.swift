@@ -722,6 +722,9 @@ pre {
                             filePath: filePath
                         });
                     });
+                },
+                writeLine: function(text) {
+                    window.webkit.messageHandlers.app.postMessage({ action: "writeLine", text: text });
                 }
             };
 
@@ -794,6 +797,10 @@ pre {
                     if let callbackId = messageBody["callbackId"] as? String,
                        let filePath = messageBody["filePath"] as? String {
                         appReadFile(callbackId: callbackId, filePath: filePath, asDataURL: true)
+                    }
+                case "writeLine":
+                    if let text = messageBody["text"] as? String {
+                        appWriteLine(text)
                     }
                 default:
                     logError("Unknown action: \(action)")
@@ -916,6 +923,10 @@ pre {
 
     func appRevealInFinder(path: String) {
         NSWorkspace.shared.selectFile(path, inFileViewerRootedAtPath: "")
+    }
+
+    func appWriteLine(_ text: String) {
+        print(text)
     }
 
     func applicationWillTerminate(_ aNotification: Notification) {

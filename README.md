@@ -95,6 +95,7 @@ The following methods are available on `window.app`:
 - `app.revealInFinder(path)`: Opens Finder and reveals the file or folder at the given path.
 - `app.readFile(filePath)`: Reads a file as text. Returns a Promise that resolves to the file content as a string, or rejects on error.
 - `app.readFileAsDataURL(filePath)`: Reads a file and returns it as a Data URL (base64-encoded). Useful for images and binary files. Returns a Promise that resolves to the Data URL string, or rejects on error.
+- `app.writeLine(text)`: Prints a line of text to stdout. Useful for logging or outputting data from JavaScript to the terminal.
 
 #### Example usage:
 
@@ -139,6 +140,10 @@ window.app.readFileAsDataURL("/path/to/image.png").then(dataURL => {
   img.src = dataURL;
   document.body.appendChild(img);
 });
+
+// Print to stdout
+window.app.writeLine("Hello from JavaScript!");
+window.app.writeLine("This appears in the terminal");
 ```
 
 ### File Drop Events
