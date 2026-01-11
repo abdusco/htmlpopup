@@ -60,6 +60,8 @@ htmlpopup --env '{"API_KEY": "old_key"}' --env.API_KEY "new_key" --env.DEBUG tru
 *   Configurable window title, width, and height.
 *   Inject JSON environment variables into the web view (`window.env`).
 *   Window can be pinned to stay on top.
+*   File drag-and-drop support with `files-dropped` event.
+*   File system access: read files, save files, select files/folders, reveal in Finder.
 
 
 ## JavaScript API
@@ -82,7 +84,17 @@ The following methods are available on `window.app`:
 - `app.setSize(width, height)`: Sets the window size in pixels.
 - `app.setFullscreen(enabled)`: Toggles fullscreen mode (`enabled` is a boolean).
 - `app.setFloating(enabled)`: Pins or unpins the window on top (`enabled` is a boolean).
+- `app.setTitle(title)`: Sets the window title.
 - `app.selectFolder()`: Opens a folder picker dialog. Returns a Promise that resolves to the selected folder path (the real path on the disk), or rejects if cancelled.
+- `app.selectFile(options)`: Opens a file picker dialog. Returns a Promise that resolves to the selected file path(s), or rejects if cancelled. The `options` parameter is an optional object with:
+  - `canChooseFiles` (boolean, default: `true`): Allow selecting files
+  - `canChooseDirectories` (boolean, default: `false`): Allow selecting directories
+  - `allowsMultipleSelection` (boolean, default: `false`): Allow selecting multiple items
+  - `allowedFileTypes` (array of strings, optional): Filter by file extensions (e.g., `["txt", "pdf"]`)
+- `app.saveFile(content, fileName)`: Opens a save dialog. Returns a Promise that resolves to the saved file path, or rejects if cancelled. `content` is a string with the file content, `fileName` is an optional default filename.
+- `app.revealInFinder(path)`: Opens Finder and reveals the file or folder at the given path.
+- `app.readFile(filePath)`: Reads a file as text. Returns a Promise that resolves to the file content as a string, or rejects on error.
+- `app.readFileAsDataURL(filePath)`: Reads a file and returns it as a Data URL (base64-encoded). Useful for images and binary files. Returns a Promise that resolves to the Data URL string, or rejects on error.
 
 #### Example usage:
 
@@ -105,7 +117,49 @@ window.app.selectFolder().then(path => {
 }).catch(err => {
   console.log("Selection cancelled");
 });
+
+// Select a file
+window.app.selectFile({ allowedFileTypes: ["txt", "pdf"] }).then(path => {
+  console.log("Selected file:", path);
+});
+
+// Save a file
+window.app.saveFile("Hello, World!", "greeting.txt").then(path => {
+  console.log("Saved to:", path);
+});
+
+// Read a file
+window.app.readFile("/path/to/file.txt").then(content => {
+  console.log("File content:", content);
+});
+
+// Read a file as Data URL (useful for images)
+window.app.readFileAsDataURL("/path/to/image.png").then(dataURL => {
+  const img = document.createElement("img");
+  img.src = dataURL;
+  document.body.appendChild(img);
+});
 ```
+
+### File Drop Events
+
+The webview supports drag-and-drop file operations. When files are dropped onto the window, a `files-dropped` event is dispatched with the file paths:
+
+```js
+window.addEventListener('files-dropped', function(event) {
+  const files = event.detail.files; // Array of file paths
+  console.log('Dropped files:', files);
+  
+  // Read the first dropped file
+  if (files.length > 0) {
+    window.app.readFile(files[0]).then(content => {
+      console.log('File content:', content);
+    });
+  }
+});
+```
+
+**Note:** Dropping files will not navigate to the file. The drop is handled by the app and triggers the `files-dropped` event instead.
 
 
 ## Build and Run

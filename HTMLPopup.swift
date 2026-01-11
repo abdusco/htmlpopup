@@ -266,6 +266,57 @@ class WindowController: NSWindowController, NSWindowDelegate {
     }
 }
 
+class DraggableWebView: WKWebView {
+    weak var appDelegate: AppDelegate?
+    
+    override func awakeFromNib() {
+        super.awakeFromNib()
+        registerForDraggedTypes([.fileURL, .string])
+    }
+    
+    override init(frame: CGRect, configuration: WKWebViewConfiguration) {
+        super.init(frame: frame, configuration: configuration)
+        registerForDraggedTypes([.fileURL, .string])
+    }
+    
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        registerForDraggedTypes([.fileURL, .string])
+    }
+    
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        if sender.draggingPasteboard.types?.contains(.fileURL) == true {
+            return .copy
+        }
+        return []
+    }
+    
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        guard let urls = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self]) as? [URL] else {
+            return false
+        }
+        
+        let paths = urls.map { $0.path }
+        
+        do {
+            let jsonData = try JSONSerialization.data(withJSONObject: paths, options: [])
+            guard let jsonString = String(data: jsonData, encoding: .utf8) else { return false }
+            
+            let jsCallback = """
+            window.dispatchEvent(new CustomEvent('files-dropped', {
+                detail: { files: \(jsonString) }
+            }));
+            """
+            
+            evaluateJavaScript(jsCallback)
+        } catch {
+            logError("JSON serialization error: \(error)")
+        }
+        
+        return true
+    }
+}
+
 class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKScriptMessageHandler {
     var windowController: WindowController?
     var webView: WKWebView?
@@ -419,10 +470,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKScri
             logFatalError("Window contentView is nil.")
         }
 
-        webView = WKWebView(frame: contentView.bounds, configuration: config)
+        webView = DraggableWebView(frame: contentView.bounds, configuration: config)
         guard let webView = webView else {
             logFatalError("Failed to create WKWebView.")
         }
+        (webView as? DraggableWebView)?.appDelegate = self
         webView.autoresizingMask = [.width, .height]
         webView.navigationDelegate = self
 
@@ -648,6 +700,28 @@ pre {
                             fileName: fileName
                         });
                     });
+                },
+                readFile: function(filePath) {
+                    return new Promise((resolve, reject) => {
+                        const callbackId = 'callback_' + Math.random().toString(36).substr(2, 9);
+                        window[callbackId] = { resolve: resolve, reject: reject };
+                        window.webkit.messageHandlers.app.postMessage({
+                            action: "readFile",
+                            callbackId: callbackId,
+                            filePath: filePath
+                        });
+                    });
+                },
+                readFileAsDataURL: function(filePath) {
+                    return new Promise((resolve, reject) => {
+                        const callbackId = 'callback_' + Math.random().toString(36).substr(2, 9);
+                        window[callbackId] = { resolve: resolve, reject: reject };
+                        window.webkit.messageHandlers.app.postMessage({
+                            action: "readFileAsDataURL",
+                            callbackId: callbackId,
+                            filePath: filePath
+                        });
+                    });
                 }
             };
 
@@ -710,6 +784,16 @@ pre {
                 case "revealInFinder":
                     if let path = messageBody["path"] as? String {
                         appRevealInFinder(path: path)
+                    }
+                case "readFile":
+                    if let callbackId = messageBody["callbackId"] as? String,
+                       let filePath = messageBody["filePath"] as? String {
+                        appReadFile(callbackId: callbackId, filePath: filePath, asDataURL: false)
+                    }
+                case "readFileAsDataURL":
+                    if let callbackId = messageBody["callbackId"] as? String,
+                       let filePath = messageBody["filePath"] as? String {
+                        appReadFile(callbackId: callbackId, filePath: filePath, asDataURL: true)
                     }
                 default:
                     logError("Unknown action: \(action)")
@@ -883,6 +967,54 @@ pre {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         return true
+    }
+
+    func appReadFile(callbackId: String, filePath: String, asDataURL: Bool) {
+        guard let webView = self.webView else { return }
+        
+        let fileURL = URL(fileURLWithPath: filePath)
+        
+        do {
+            let data = try Data(contentsOf: fileURL)
+            
+            let result: String
+            if asDataURL {
+                let mimeType = getMimeType(for: filePath)
+                let base64 = data.base64EncodedString()
+                result = "data:\(mimeType);base64,\(base64)"
+            } else {
+                result = String(data: data, encoding: .utf8) ?? ""
+            }
+            
+            let jsonData = try JSONSerialization.data(withJSONObject: [result], options: [])
+            guard let jsonString = String(data: jsonData, encoding: .utf8) else { return }
+            let content = String(jsonString.dropFirst().dropLast())
+            
+            let jsCallback = """
+            (function() {
+                const cb = window['\(callbackId)'];
+                if (cb) {
+                    cb.resolve(\(content));
+                    delete window['\(callbackId)'];
+                }
+            })();
+            """
+            
+            webView.evaluateJavaScript(jsCallback)
+        } catch {
+            let jsCallback = "if(window['\(callbackId)']) { window['\(callbackId)'].reject('\(error.localizedDescription)'); delete window['\(callbackId)']; }"
+            webView.evaluateJavaScript(jsCallback)
+        }
+    }
+    
+    private func getMimeType(for path: String) -> String {
+        let ext = (path as NSString).pathExtension.lowercased()
+        let mimeTypes: [String: String] = [
+            "jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
+            "gif": "image/gif", "webp": "image/webp", "svg": "image/svg+xml",
+            "txt": "text/plain", "pdf": "application/pdf", "json": "application/json"
+        ]
+        return mimeTypes[ext] ?? "application/octet-stream"
     }
 
     private func generateDirectoryListing(for directory: URL) -> String {
