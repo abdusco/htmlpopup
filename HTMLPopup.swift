@@ -50,9 +50,62 @@ Options:
   --width <width>         Set the window width (default: 800)
   --height <height>       Set the window height (default: 600)
   --env <json_object>     Provide a JSON object to be injected as window.env in the web view.
-  --env.<key> <value>     Provide individual key-value pairs to be injected as window.env. Values are parsed as JSON if possible, otherwise as strings.
+  --env.<key> <value>     Provide individual key-value pairs to be injected as window.env.
+                          Values are parsed as JSON if possible, otherwise as strings.
   --version               Print the version of htmlpopup.
   --help                  Print this help message.
+
+Javascript API:
+  Your HTML has access to the following Javascript APIs:
+
+  interface App {
+    // Properties
+    theme: 'light' | 'dark';  // Current system theme
+
+    // Window Control
+    finish(message: string): void;  // Close window and print message to stdout
+    setSize(width: number, height: number): void;  // Resize the window
+    setFullscreen(enabled: boolean): void;  // Toggle fullscreen mode
+    setFloating(enabled: boolean): void;  // Pin/unpin window to stay on top
+    setTitle(title: string): void;  // Change the window title
+
+    // File System
+    selectFolder(): Promise<string>;  // Open native folder picker dialog
+    selectFile(options?: {  // Open native file picker dialog
+      canChooseFiles?: boolean;
+      canChooseDirectories?: boolean;
+      allowsMultipleSelection?: boolean;
+      allowedFileTypes?: string[];
+    }): Promise<string | string[]>;
+    saveFile(content: string, fileName?: string): Promise<string>;  // Open save dialog
+    readFile(filePath: string): Promise<string>;  // Read file content as text
+    readFileAsDataURL(filePath: string): Promise<string>;  // Read file as base64 Data URL
+    revealInFinder(path: string): void;  // Show file/folder in Finder
+
+    // Terminal Output
+    writeLine(text: string): void;  // Print line to stdout
+  }
+
+  declare const window: {
+    env: Record<string, any>;  // From --env or --env.<key>
+    app: App;
+  };
+
+  // Events
+  'files-dropped': CustomEvent<{ files: string[] }>;  // Fired when files are dropped
+  'themechange': CustomEvent<{ theme: 'light' | 'dark' }>;  // Fired on theme change
+
+  // CSS Variables (auto-adapt to theme)
+  --htmlpopup-background, --htmlpopup-text, --htmlpopup-border,
+  --htmlpopup-surface, --htmlpopup-link, --htmlpopup-muted
+
+Examples:
+  htmlpopup "<h1>Hello, World!</h1>"
+  htmlpopup my_page.html
+  htmlpopup --width 1024 --height 768 --title "My App" ./static/
+  htmlpopup --env.API_KEY "secret" --env.DEBUG true app.html
+  echo "<p>From stdin</p>" | htmlpopup -
+
 """, stderr)
 }
 
