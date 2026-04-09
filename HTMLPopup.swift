@@ -370,6 +370,89 @@ class DraggableWebView: WKWebView {
     }
 }
 
+class LocalFileSchemeHandler: NSObject, WKURLSchemeHandler {
+    let rootDirectory: URL
+
+    init(rootDirectory: URL) {
+        self.rootDirectory = rootDirectory
+        super.init()
+    }
+
+    func webView(_ webView: WKWebView, start urlSchemeTask: WKURLSchemeTask) {
+        guard let requestURL = urlSchemeTask.request.url,
+              let components = URLComponents(url: requestURL, resolvingAgainstBaseURL: false)
+        else {
+            urlSchemeTask.didFailWithError(NSError(domain: NSURLErrorDomain, code: NSURLErrorBadURL))
+            return
+        }
+
+        var relativePath = components.percentEncodedPath
+        if relativePath.hasPrefix("/") { relativePath = String(relativePath.dropFirst()) }
+        let decoded = relativePath.removingPercentEncoding ?? relativePath
+
+        let fileURL = rootDirectory.appendingPathComponent(decoded).standardizedFileURL
+        let root = rootDirectory.standardizedFileURL
+
+        guard fileURL.path.hasPrefix(root.path) else {
+            respond(to: urlSchemeTask, status: 404, mime: "text/html", body: "<h1>404 Not Found</h1>")
+            return
+        }
+
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: fileURL.path, isDirectory: &isDir),
+              !isDir.boolValue
+        else {
+            respond(to: urlSchemeTask, status: 404, mime: "text/html", body: "<h1>404 Not Found</h1>")
+            return
+        }
+
+        do {
+            let data = try Data(contentsOf: fileURL)
+            let mime = mimeType(for: fileURL.pathExtension.lowercased())
+            let response = HTTPURLResponse(url: requestURL, statusCode: 200, httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": mime, "Content-Length": "\(data.count)", "Cache-Control": "no-store"])!
+            urlSchemeTask.didReceive(response)
+            urlSchemeTask.didReceive(data)
+            urlSchemeTask.didFinish()
+        } catch {
+            urlSchemeTask.didFailWithError(error)
+        }
+    }
+
+    func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {}
+
+    private func respond(to task: WKURLSchemeTask, status: Int, mime: String, body: String) {
+        let data = Data(body.utf8)
+        let response = HTTPURLResponse(url: task.request.url!, statusCode: status,
+            httpVersion: "HTTP/1.1", headerFields: ["Content-Type": mime])!
+        task.didReceive(response)
+        task.didReceive(data)
+        task.didFinish()
+    }
+
+    private func mimeType(for ext: String) -> String {
+        switch ext {
+        case "html", "htm": return "text/html; charset=utf-8"
+        case "css":         return "text/css; charset=utf-8"
+        case "js", "mjs":   return "text/javascript; charset=utf-8"
+        case "json":        return "application/json; charset=utf-8"
+        case "svg":         return "image/svg+xml"
+        case "png":         return "image/png"
+        case "jpg", "jpeg": return "image/jpeg"
+        case "gif":         return "image/gif"
+        case "webp":        return "image/webp"
+        case "ico":         return "image/x-icon"
+        case "woff":        return "font/woff"
+        case "woff2":       return "font/woff2"
+        case "ttf":         return "font/ttf"
+        case "otf":         return "font/otf"
+        case "wasm":        return "application/wasm"
+        case "txt":         return "text/plain; charset=utf-8"
+        default:            return "application/octet-stream"
+        }
+    }
+}
+
 class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKScriptMessageHandler {
     var windowController: WindowController?
     var webView: WKWebView?
@@ -504,20 +587,28 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKScri
         }
 
         let hostID = stableUUID(from: identifierSource).uuidString.lowercased().replacingOccurrences(of: "-", with: "")
-        let dummyOrigin = URL(string: "http://\(hostID).local")!
 
         // 2. CONFIGURE PERSISTENCE
         config.websiteDataStore = WKWebsiteDataStore.default()
 
         config.preferences.setValue(true, forKey: "developerExtrasEnabled")
-        config.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
-        config.setValue(true, forKey: "allowUniversalAccessFromFileURLs")
 
         if #available(macOS 11.0, *) {
             config.defaultWebpagePreferences.allowsContentJavaScript = true
         } else {
             config.preferences.javaScriptEnabled = true
         }
+
+        // Register scheme handler for serving local files
+        let resolvedRootDirectory: URL
+        if let staticDir = options.staticDirectory {
+            resolvedRootDirectory = URL(fileURLWithPath: staticDir, isDirectory: true).standardizedFileURL
+        } else if let fp = options.filePath {
+            resolvedRootDirectory = URL(fileURLWithPath: fp).deletingLastPathComponent().standardizedFileURL
+        } else {
+            resolvedRootDirectory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true).standardizedFileURL
+        }
+        config.setURLSchemeHandler(LocalFileSchemeHandler(rootDirectory: resolvedRootDirectory), forURLScheme: "app")
 
         guard let contentView = windowController?.window?.contentView else {
             logFatalError("Window contentView is nil.")
@@ -541,30 +632,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKScri
             let indexURL = dirURL.appendingPathComponent("index.html")
 
             if FileManager.default.fileExists(atPath: indexURL.path) {
-                webView.loadFileURL(indexURL, allowingReadAccessTo: dirURL)
+                webView.load(URLRequest(url: URL(string: "app://localhost/index.html")!))
             } else {
                 // Generate directory listing if index.html is missing
                 let html = generateDirectoryListing(for: dirURL)
-                webView.loadHTMLString(html, baseURL: dirURL)
+                webView.loadHTMLString(html, baseURL: URL(string: "app://localhost/")!)
             }
         } else if let url = options.url {
             webView.load(URLRequest(url: url))
         } else if !options.html.isEmpty {
-            let baseURL: URL
-            if let fp = options.filePath {
-                baseURL = URL(fileURLWithPath: fp).deletingLastPathComponent()
-            } else {
-                baseURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
-            }
-
-            let baseTag = "<base href=\"\(baseURL.absoluteString)\">"
-            var html = options.html
-            if html.lowercased().contains("<head>") {
-                html = html.replacingOccurrences(of: "<head>", with: "<head>\(baseTag)", options: .caseInsensitive)
-            } else {
-                html = "<head>\(baseTag)</head>" + html
-            }
-            webView.loadHTMLString(html, baseURL: dummyOrigin)
+            // Use app://[hostID].local/ as base so relative asset refs are served by the
+            // scheme handler, and localStorage is partitioned per content hash (same as before)
+            webView.loadHTMLString(options.html, baseURL: URL(string: "app://\(hostID).local/")!)
         }
 
         contentView.addSubview(webView)
@@ -587,8 +666,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKScri
                 return
             }
 
-            // 2. Allow standard web/file schemes
-            if ["http", "https", "about", "file"].contains(scheme) {
+            // 2. Allow standard web schemes and our custom app:// scheme
+            if ["http", "https", "about", "app"].contains(scheme) {
                 decisionHandler(.allow)
                 return
             }
