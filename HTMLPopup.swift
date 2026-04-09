@@ -541,19 +541,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKScri
             let indexURL = dirURL.appendingPathComponent("index.html")
 
             if FileManager.default.fileExists(atPath: indexURL.path) {
-                if var html = try? String(contentsOf: indexURL) {
-                    // Inject <base> tag to support relative paths while using a custom origin
-                    let baseTag = "<base href=\"\(dirURL.absoluteString)\">"
-                    if html.lowercased().contains("<head>") {
-                        html = html.replacingOccurrences(of: "<head>", with: "<head>\(baseTag)", options: .caseInsensitive)
-                    } else {
-                        html = "<head>\(baseTag)</head>" + html
-                    }
-                    webView.loadHTMLString(html, baseURL: dummyOrigin)
-                } else {
-                    // Fallback to file URL if reading fails
-                    webView.loadFileURL(indexURL, allowingReadAccessTo: dirURL)
-                }
+                webView.loadFileURL(indexURL, allowingReadAccessTo: dirURL)
             } else {
                 // Generate directory listing if index.html is missing
                 let html = generateDirectoryListing(for: dirURL)
