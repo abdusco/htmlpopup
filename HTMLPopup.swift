@@ -453,7 +453,7 @@ class LocalFileSchemeHandler: NSObject, WKURLSchemeHandler {
     }
 }
 
-class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKScriptMessageHandler {
+class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
     var windowController: WindowController?
     var webView: WKWebView?
     var closeString: String?
@@ -621,6 +621,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKScri
         (webView as? DraggableWebView)?.appDelegate = self
         webView.autoresizingMask = [.width, .height]
         webView.navigationDelegate = self
+        webView.uiDelegate = self
 
         if #available(macOS 10.14, *) {
             webView.setValue(false, forKey: "drawsBackground")
@@ -681,6 +682,53 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKScri
         }
 
         decisionHandler(.allow)
+    }
+
+    func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String,
+                 initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping () -> Void) {
+        let alert = NSAlert()
+        alert.messageText = message
+        alert.addButton(withTitle: "OK")
+        presentAlert(alert) { _ in completionHandler() }
+    }
+
+    func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String,
+                 initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) {
+        let alert = NSAlert()
+        alert.messageText = message
+        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "Cancel")
+        presentAlert(alert) { response in
+            completionHandler(response == .alertFirstButtonReturn)
+        }
+    }
+
+    func webView(_ webView: WKWebView, runJavaScriptTextInputPanelWithPrompt prompt: String,
+                 defaultText: String?, initiatedByFrame frame: WKFrameInfo,
+                 completionHandler: @escaping (String?) -> Void) {
+        let alert = NSAlert()
+        alert.messageText = prompt
+        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "Cancel")
+
+        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+        input.stringValue = defaultText ?? ""
+        alert.accessoryView = input
+        alert.window.initialFirstResponder = input
+
+        presentAlert(alert) { response in
+            completionHandler(response == .alertFirstButtonReturn ? input.stringValue : nil)
+        }
+    }
+
+    private func presentAlert(_ alert: NSAlert, completion: @escaping (NSApplication.ModalResponse) -> Void) {
+        guard let window = windowController?.window else {
+            completion(alert.runModal())
+            return
+        }
+        alert.beginSheetModal(for: window) { response in
+            completion(response)
+        }
     }
 
     func setupUserScripts(userContentController: WKUserContentController, env: [String: Any] = [:]) {
