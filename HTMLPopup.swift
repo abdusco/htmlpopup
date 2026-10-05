@@ -2,6 +2,7 @@ import Cocoa
 import WebKit
 import CommonCrypto
 import UniformTypeIdentifiers
+import Darwin
 
 func logError(_ message: String) {
     fputs("ERROR: \(message)\n", stderr)
@@ -30,6 +31,46 @@ struct Options {
     var staticDirectory: String? = nil
     var filePath: String? = nil
     var storageID: String? = nil
+    var keepAlive = false
+    var workingDirectory = FileManager.default.currentDirectoryPath
+
+    func launchData() throws -> Data {
+        var payload: [String: Any] = [
+            "html": html, "title": title, "width": Double(width),
+            "height": Double(height), "env": env, "workingDirectory": workingDirectory
+        ]
+        payload["url"] = url?.absoluteString
+        payload["staticDirectory"] = staticDirectory
+        payload["filePath"] = filePath
+        payload["id"] = storageID
+        return try JSONSerialization.data(withJSONObject: payload)
+    }
+
+    init() {}
+
+    init(launchData: Data) throws {
+        guard let payload = try JSONSerialization.jsonObject(with: launchData) as? [String: Any],
+              let html = payload["html"] as? String,
+              let title = payload["title"] as? String,
+              let width = payload["width"] as? Double,
+              let height = payload["height"] as? Double,
+              let env = payload["env"] as? [String: Any],
+              let id = payload["id"] as? String,
+              let workingDirectory = payload["workingDirectory"] as? String else {
+            throw ArgumentError(message: "Invalid launch request.")
+        }
+        self.html = html
+        self.title = title
+        self.width = CGFloat(width)
+        self.height = CGFloat(height)
+        self.env = env
+        self.storageID = id
+        self.keepAlive = true
+        self.workingDirectory = workingDirectory
+        self.url = (payload["url"] as? String).flatMap { URL(string: $0) }
+        self.staticDirectory = payload["staticDirectory"] as? String
+        self.filePath = payload["filePath"] as? String
+    }
 }
 
 var currentVersion = "dev" // Default version, will be overridden by build system
@@ -46,6 +87,8 @@ Arguments:
     or generate a directory listing if 'index.html' is not found.
 
 Options:
+  --id <id>              Set the storage identity (required with --keep-alive).
+  --keep-alive           Hide on close; reload in the existing webview for this --id.
   --title <title>         Set the window title (default: <empty>).
   --width <width>         Set the window width (default: 800)
   --height <height>       Set the window height (default: 600)
@@ -140,6 +183,10 @@ func parseArguments() throws -> Options {
         }
 
         if parsingFlags && arg.hasPrefix("--") {
+            if arg == "--keep-alive" {
+                options.keepAlive = true
+                continue
+            }
             if arg.hasPrefix("--env.") {
                 let key = String(arg.dropFirst(6))
                 guard let valueString = argIterator.next() else {
@@ -184,9 +231,9 @@ func parseArguments() throws -> Options {
                     var isDir: ObjCBool = false
                     if FileManager.default.fileExists(atPath: arg, isDirectory: &isDir) {
                         if isDir.boolValue {
-                            options.staticDirectory = arg // Allowed even without index.html now
+                            options.staticDirectory = URL(fileURLWithPath: arg).standardizedFileURL.path
                         } else {
-                            options.filePath = arg
+                            options.filePath = URL(fileURLWithPath: arg).standardizedFileURL.path
                             options.html = try String(contentsOfFile: arg, encoding: .utf8)
                         }
                     } else {
@@ -204,6 +251,10 @@ func parseArguments() throws -> Options {
     }
 
     options.env = options.env.merging(envArgs) { (_, new) in new }
+
+    if options.keepAlive && (options.storageID?.isEmpty ?? true) {
+        throw ArgumentError(message: "--keep-alive requires a nonempty --id.")
+    }
 
     guard !(options.html.isEmpty && options.url == nil && options.staticDirectory == nil) else {
         throw ArgumentError(message: "No content provided (HTML string, file, or URL).")
@@ -223,6 +274,13 @@ func stableUUID(from string: String) -> UUID {
 
 class WindowController: NSWindowController, NSWindowDelegate {
     private var pinButton: NSButton!
+    var keepAlive = false
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        guard keepAlive else { return true }
+        NSApplication.shared.hide(nil)
+        return false
+    }
     public var isPinned: Bool {
         get {
             return window?.level == .floating
@@ -303,6 +361,10 @@ class WindowController: NSWindowController, NSWindowDelegate {
     private func setupKeyEventMonitor() {
         keyEventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             if event.keyCode == 53 { // ESC key
+                if self?.keepAlive == true {
+                    NSApplication.shared.hide(nil)
+                    return nil
+                }
                 // Unfloat the window and move it to background
                 self?.isPinned = false
                 self?.window?.orderBack(nil)
@@ -371,7 +433,7 @@ class DraggableWebView: WKWebView {
 }
 
 class LocalFileSchemeHandler: NSObject, WKURLSchemeHandler {
-    let rootDirectory: URL
+    var rootDirectory: URL
 
     init(rootDirectory: URL) {
         self.rootDirectory = rootDirectory
@@ -457,12 +519,103 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
     var windowController: WindowController?
     var webView: WKWebView?
     var closeString: String?
-    let options: Options
+    var options: Options
     private var themeObserver: NSKeyValueObservation?
+    private var instanceLock: Int32 = -1
+    private var instanceNotification: Notification.Name?
+    private var requestDirectory: URL?
+    private var localFileHandler: LocalFileSchemeHandler?
 
     init(options: Options) {
         self.options = options
         super.init()
+    }
+
+    // Register before taking the lock so a concurrent launch can request a show
+    // even while the first instance is still setting up its window.
+    func preparePersistentInstance() throws -> Bool {
+        guard options.keepAlive, let id = options.storageID else { return true }
+        let key = stableUUID(from: id).uuidString.lowercased()
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("htmlpopup-\(getuid())-\(key).requests", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700])
+        let attributes = try FileManager.default.attributesOfItem(atPath: directory.path)
+        guard attributes[.type] as? FileAttributeType == .typeDirectory,
+              (attributes[.ownerAccountID] as? NSNumber)?.uint32Value == getuid(),
+              (attributes[.posixPermissions] as? NSNumber)?.intValue == 0o700 else {
+            throw ArgumentError(message: "Instance request directory must be owned by you with permissions 0700.")
+        }
+        requestDirectory = directory
+        let name = Notification.Name("htmlpopup.\(getuid()).\(key).show")
+        instanceNotification = name
+        DistributedNotificationCenter.default().addObserver(
+            self, selector: #selector(showPersistentWindow(_:)), name: name,
+            object: nil, suspensionBehavior: .deliverImmediately
+        )
+
+        let lockURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("htmlpopup-\(getuid())-\(key).lock")
+        instanceLock = open(lockURL.path, O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC, mode_t(0o600))
+        guard instanceLock >= 0 else {
+            throw ArgumentError(message: "Cannot open instance lock: \(String(cString: strerror(errno)))")
+        }
+        if flock(instanceLock, LOCK_EX | LOCK_NB) == 0 { return true }
+        let lockError = errno
+        close(instanceLock)
+        instanceLock = -1
+        guard lockError == EWOULDBLOCK else {
+            throw ArgumentError(message: "Cannot lock instance: \(String(cString: strerror(lockError)))")
+        }
+        // Only the random token is broadcast; environment values (including
+        // API keys) stay in the owner's private directory until consumed.
+        let token = UUID().uuidString
+        let requestURL = directory.appendingPathComponent(token)
+        try options.launchData().write(to: requestURL, options: .atomic)
+        DistributedNotificationCenter.default().postNotificationName(
+            name, object: token, userInfo: nil, deliverImmediately: true
+        )
+        return false
+    }
+
+    @objc private func showPersistentWindow(_ notification: Notification) {
+        guard let token = notification.object as? String, UUID(uuidString: token) != nil,
+              let directory = requestDirectory else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            let requestURL = directory.appendingPathComponent(token)
+            defer { try? FileManager.default.removeItem(at: requestURL) }
+            do {
+                let updated = try Options(launchData: Data(contentsOf: requestURL))
+                guard updated.storageID == self.options.storageID else { return }
+                self.options = updated
+                guard let webView = self.webView else { return }
+                webView.stopLoading()
+                let controller = webView.configuration.userContentController
+                controller.removeAllUserScripts()
+                self.setupUserScripts(userContentController: controller, env: updated.env)
+                self.localFileHandler?.rootDirectory = self.resolvedRootDirectory()
+                self.windowController?.window?.title = updated.title
+                self.windowController?.window?.setContentSize(NSSize(width: updated.width, height: updated.height))
+                self.loadContent()
+                self.showWindow()
+            } catch {
+                logError("Cannot read launch request: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func showWindow() {
+        guard let window = windowController?.window else { return }
+        if window.isMiniaturized { window.deminiaturize(nil) }
+        NSApplication.shared.unhide(nil)
+        window.makeKeyAndOrderFront(nil)
+        NSApplication.shared.activate(ignoringOtherApps: true)
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        showWindow()
+        return true
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -560,6 +713,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
             height: options.height,
             title: options.title
         )
+        windowController?.keepAlive = options.keepAlive
 
         let userContentController = WKUserContentController()
         userContentController.add(self, name: "app")
@@ -568,27 +722,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
         let config = WKWebViewConfiguration()
         config.userContentController = userContentController
 
-        // 1. GENERATE UNIQUE ORIGIN
-        // We use http://[ID].local to guarantee localStorage partitioning by hostname.
-        // We use a stable hash of the source to keep the hostname clean and consistent.
-        let identifierSource: String
-        if let sid = options.storageID {
-            identifierSource = sid
-        } else if let fp = options.filePath {
-            identifierSource = fp // Stable path, content can change
-        } else if let sd = options.staticDirectory {
-            identifierSource = sd
-        } else if let url = options.url {
-            identifierSource = url.absoluteString
-        } else if !options.html.isEmpty {
-            identifierSource = "html-" + stableUUID(from: options.html).uuidString
-        } else {
-            identifierSource = "default"
-        }
-
-        let hostID = stableUUID(from: identifierSource).uuidString.lowercased().replacingOccurrences(of: "-", with: "")
-
-        // 2. CONFIGURE PERSISTENCE
+        // Configure persistent website storage.
         config.websiteDataStore = WKWebsiteDataStore.default()
 
         config.preferences.setValue(true, forKey: "developerExtrasEnabled")
@@ -600,15 +734,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
         }
 
         // Register scheme handler for serving local files
-        let resolvedRootDirectory: URL
-        if let staticDir = options.staticDirectory {
-            resolvedRootDirectory = URL(fileURLWithPath: staticDir, isDirectory: true).standardizedFileURL
-        } else if let fp = options.filePath {
-            resolvedRootDirectory = URL(fileURLWithPath: fp).deletingLastPathComponent().standardizedFileURL
-        } else {
-            resolvedRootDirectory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true).standardizedFileURL
-        }
-        config.setURLSchemeHandler(LocalFileSchemeHandler(rootDirectory: resolvedRootDirectory), forURLScheme: "app")
+        localFileHandler = LocalFileSchemeHandler(rootDirectory: resolvedRootDirectory())
+        config.setURLSchemeHandler(localFileHandler, forURLScheme: "app")
 
         guard let contentView = windowController?.window?.contentView else {
             logFatalError("Window contentView is nil.")
@@ -627,7 +754,26 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
             webView.setValue(false, forKey: "drawsBackground")
         }
 
-        // 3. LOAD CONTENT
+        loadContent()
+        contentView.addSubview(webView)
+        showWindow()
+    }
+
+    private func resolvedRootDirectory() -> URL {
+        if let directory = options.staticDirectory {
+            return URL(fileURLWithPath: directory, isDirectory: true).standardizedFileURL
+        }
+        if let file = options.filePath {
+            return URL(fileURLWithPath: file).deletingLastPathComponent().standardizedFileURL
+        }
+        return URL(fileURLWithPath: options.workingDirectory, isDirectory: true).standardizedFileURL
+    }
+
+    private func loadContent() {
+        guard let webView = webView else { return }
+        let identifierSource = options.storageID ?? options.filePath ?? options.staticDirectory
+            ?? options.url?.absoluteString ?? ("html-" + stableUUID(from: options.html).uuidString)
+        let hostID = stableUUID(from: identifierSource).uuidString.lowercased().replacingOccurrences(of: "-", with: "")
         if let staticDir = options.staticDirectory {
             let dirURL = URL(fileURLWithPath: staticDir, isDirectory: true)
             let indexURL = dirURL.appendingPathComponent("index.html")
@@ -646,11 +792,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
             // scheme handler, and localStorage is partitioned per content hash (same as before)
             webView.loadHTMLString(options.html, baseURL: URL(string: "app://\(hostID).local/")!)
         }
-
-        contentView.addSubview(webView)
-        windowController?.showWindow(nil)
-        NSApplication.shared.activate(ignoringOtherApps: true)
-        windowController?.window?.makeKeyAndOrderFront(nil)
     }
 
     func webView(_ webView: WKWebView,
@@ -1098,6 +1239,13 @@ pre {
     }
 
     func applicationWillTerminate(_ aNotification: Notification) {
+        if let name = instanceNotification {
+            DistributedNotificationCenter.default().removeObserver(self, name: name, object: nil)
+        }
+        if instanceLock >= 0 {
+            close(instanceLock)
+            instanceLock = -1
+        }
         themeObserver?.invalidate()
         themeObserver = nil
 
@@ -1145,7 +1293,7 @@ pre {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        return true
+        return !options.keepAlive
     }
 
     func appReadFile(callbackId: String, filePath: String, asDataURL: Bool) {
@@ -1255,10 +1403,14 @@ do {
     let options = try parseArguments()
     let app = NSApplication.shared
     appDelegate = AppDelegate(options: options)
+    if try !appDelegate!.preparePersistentInstance() { exit(0) }
     app.delegate = appDelegate
     app.run()
 } catch let error as ArgumentError {
     logError(error.message)
     printUsage()
+    exit(1)
+} catch {
+    logError(error.localizedDescription)
     exit(1)
 }

@@ -19,6 +19,8 @@ htmlpopup [OPTIONS] <html_content_or_file|directory|url|stdin>
 ### Options:
 
 *   `--title <title>`: Set the window title.
+*   `--id <id>`: Set the storage and instance identity.
+*   `--keep-alive`: Reuse the process and webview across launches. Requires `--id`.
 *   `--width <width>`: Set the window width (default: 800).
 *   `--height <height>`: Set the window height (default: 600).
 *   `--env <json_string>`: Provide a JSON string to be injected as `window.env` in the web view. This is useful for complex JSON structures.
@@ -64,6 +66,19 @@ htmlpopup --env '{"API_KEY": "old_key"}' --env.API_KEY "new_key" --env.DEBUG tru
 *   File system access: read files, save files, select files/folders, reveal in Finder.
 *   Automatic light/dark theme support with CSS variables and theme change events.
 *   Rich JavaScript API for window control, file operations, and terminal output.
+
+## Keep-alive mode
+
+```bash
+htmlpopup --keep-alive --id chat --env.PROMPT "Hello" ./chat/
+```
+
+Repeated calls with the same ID load a fresh page in the existing webview using
+the new content, options, and `window.env`. Page state is reset; cookies and
+localStorage persist. Use different IDs for different apps.
+
+Close, Cmd+W, or Escape hides the app; Cmd+Q or `app.finish()` quits it. The first
+process stays running and owns stdout. Append `&` when launching from a shell.
 
 
 ## JavaScript API
