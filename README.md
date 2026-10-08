@@ -1,6 +1,8 @@
-# HTMLPopup
-
-A simple macOS command-line utility to display HTML content or a URL in a native webview popup window.
+<div align="center">
+  <img src="assets/htmlpopup-logo.svg" alt="HTMLPopup app logo" width="280">
+  <h1>HTMLPopup</h1>
+  <p>A macOS command-line utility for displaying HTML content or a URL in a native webview popup.</p>
+</div>
 
 ## Usage
 
