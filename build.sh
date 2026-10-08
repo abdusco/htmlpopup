@@ -17,7 +17,7 @@ sed "s/var currentVersion = \".*\"/var currentVersion = \"$VERSION_CLEAN\"/" HTM
 
 
 # Build the binary with version info
-swiftc -o htmlpopup-${ARCH} HTMLPopup.build.swift \
+swiftc -O -o htmlpopup-${ARCH} HTMLPopup.build.swift \
   -framework Cocoa -framework WebKit -framework Foundation -framework AppKit
 
 # Clean up temporary build file
